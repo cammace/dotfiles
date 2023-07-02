@@ -13,3 +13,4 @@
     ~/.zshrc: zshrc
     ~/.zprofile: zprofile
     ~/.gitconfig: gitconfig
+    ~/.gitmessage: gitmessage

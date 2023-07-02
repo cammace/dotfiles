@@ -1,0 +1,23 @@
+[user]
+    name = Cameron Mace
+	email = cameronmace10@gmail.com
+[core]
+    editor = nano
+    autocrlf = input
+    excludesfile = ~/.gitignore_global
+    precomposeunicode = true
+[push]
+    default = current
+[color]
+    ui = auto
+[commit]
+    template = ~/.gitmessage
+[http]
+    sslVerify = true
+[filter "lfs"]
+    clean = git-lfs clean -- %f
+    smudge = git-lfs smudge -- %f
+    process = git-lfs filter-process
+    required = true
+[init]
+    defaultBranch = main
