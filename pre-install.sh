@@ -1,15 +1,16 @@
 #!/bin/bash
 
 # Install homebrew and essential packages
-if command -v brew &>/dev/null; then
+if test ! $(which brew); then
   echo "Installing Homebrew..."
   /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+  eval "$(/opt/homebrew/bin/brew shellenv)"
 else
   echo "Homebrew is already installed."
 fi
 
 # Check if installation was successful
-if command -v brew &>/dev/null; then
+if test ! $(which brew); then
     echo "Failed to install Homebrew."
     exit
 fi
