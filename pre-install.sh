@@ -1,12 +1,17 @@
 #!/bin/bash
 
 # Install homebrew and essential packages
-if ! type brew > /dev/null 2>&1; then
+if command -v brew &>/dev/null; then
   echo "Installing Homebrew..."
-  /usr/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+  /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
 else
-  echo "Updating homebrew"
-  brew update
+  echo "Homebrew is already installed."
+fi
+
+# Check if installation was successful
+if command -v brew &>/dev/null; then
+    echo "Failed to install Homebrew."
+    exit
 fi
 
 # Install Brew packages
