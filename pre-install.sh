@@ -29,5 +29,3 @@ fi
 
 # Create home directories
 mkdir -p "$HOME/Fonts"
-
-# TODO: modify macos settings here.
