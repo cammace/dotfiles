@@ -3,14 +3,15 @@
 # Install homebrew and essential packages
 if ! type brew > /dev/null 2>&1; then
   echo "Installing Homebrew..."
-  /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
-  echo "Installing Brew packages..."
-  brew bundle --file Brewfile
-  echo "Finished setting up Homebrew"
+  /usr/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
 else
   echo "Updating homebrew"
   brew update
 fi
+
+# Install Brew packages
+echo "Installing Brew packages..."
+brew bundle --file Brewfile
 
 # Install Oh My Zsh
 if [ ! -d "$HOME/.oh-my-zsh" ]; then
