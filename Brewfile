@@ -1,11 +1,11 @@
-cask_args appdir: "/Applications"
-
 tap "homebrew/cask"
 tap "homebrew/cask-fonts"
 tap "homebrew/core"
 tap "homebrew/bundle"
 tap "adoptopenjdk/openjdk"
 tap "1password/tap"
+
+cask_args appdir: "/Applications"
 
 # Dependencies
 brew "mas"
