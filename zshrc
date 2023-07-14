@@ -42,6 +42,7 @@ eval "$(pyenv init -)"
 # Java Development Environment using jenv
 export PATH="$HOME/.jenv/bin:$PATH"
 eval "$(jenv init -)"
+export JAVA_HOME="$(jenv prefix)"
 
 # Config alias used for managing dotfile sync with GitHub repo
 alias config="/usr/bin/git --git-dir=/Users/$USER/.cfg/ --work-tree=/Users/$USER"
