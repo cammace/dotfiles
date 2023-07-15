@@ -4,6 +4,7 @@ tap "homebrew/core"
 tap "homebrew/bundle"
 tap "adoptopenjdk/openjdk"
 tap "1password/tap"
+tap "lencx/chatgpt", "https://github.com/lencx/ChatGPT.git"
 
 cask_args appdir: "/Applications"
 
@@ -38,6 +39,7 @@ cask "transmission"
 cask "zoom"
 cask "contexts"
 cask "vlc"
+cask "chatgpt"
 
 # App Store
 mas "TickTick", id: 966085870
