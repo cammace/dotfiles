@@ -1,4 +1,35 @@
 # Dotfiles
+scripts and other tools are assuming setup is on MacOS (Not Linux).
+
+The `bootstrap.sh` file first
+
+
+
+## TODO
+- Make dotfile repository public so cloning becomes aviable without ssh
+- have git config set `init.defaultBranch` to `main` instead of `master`
+- turn homebrew analytics off using `brew analytics off`
+- manage .ssh client config files
+- learn more about Mac's [Quick Look plugins](https://github.com/sindresorhus/quick-look-plugins) or possible use "Peek" mac store app
+- make sure Install oh-my-zsh
+- setup ssh using 1password cli
+
+
+
+
+
+
+
+
+
+
+
+
+use Brewfile to
+Make VSCode default for opening files
+
+
+
 
 
 Install Command line tools:
@@ -38,7 +69,7 @@ Install Homebrew
 Add Homebrew to PATH
 echo '# Set PATH, MANPATH, etc., for Homebrew.' >> /Users/cameron/.zprofile
  echo 'eval "$(/opt/homebrew/bin/brew shellenv)"' >> /Users/cameron/.zprofile
- eval "$(/opt/homebrew/bin/brew shellenv)" 
+ eval "$(/opt/homebrew/bin/brew shellenv)"
 
 Brewfile
 brew bundle install
@@ -50,3 +81,7 @@ Make VSCode default for opening files
 # See https://github.com/moretension/duti
 duti -s com.microsoft.VSCode public.unix-executable all
 duti -s com.microsoft.VSCode public.data all
+
+
+
+
