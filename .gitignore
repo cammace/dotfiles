@@ -14,6 +14,14 @@
 !.config/starship.toml
 !.config/bat/
 !.config/bat/config
+!.config/git/
+!.config/git/ignore
+!.config/gh/
+!.config/gh/config.yml
+
+# Claude Code
+!.claude/
+!.claude/CLAUDE.md
 
 # Homebrew
 !Brewfile
