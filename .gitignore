@@ -1,0 +1,27 @@
+# Ignore everything by default (bare repo dotfile pattern)
+*
+
+# Dotfiles
+!.gitignore
+!.zshrc
+!.zprofile
+!.bashrc
+!.gitconfig
+!.tmux.conf
+
+# XDG config
+!.config/
+!.config/starship.toml
+!.config/bat/
+!.config/bat/config
+
+# Homebrew
+!Brewfile
+
+# Scripts
+!tmux_picker.sh
+!update_ha_power.sh
+
+# Docs
+!README.md
+!CLAUDE.md
