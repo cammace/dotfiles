@@ -1,3 +1,11 @@
 [user]
 	name = Cameron Mace
 	email = cameronmace10@gmail.com
+	signingkey = key::ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMtaQBmh0OXKS6I5P+DEZqZWFOzFXfdZ7XlWE3DIZ6n6 Github Signing Key
+[commit]
+	gpgsign = true
+[gpg "ssh"]
+	program = /Applications/1Password.app/Contents/MacOS/op-ssh-sign
+[gpg]
+	program = /opt/homebrew/bin/gpg
+	format = ssh
