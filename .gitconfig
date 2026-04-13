@@ -1,7 +1,7 @@
 [user]
-	name = Cameron Mace
+	name = Cam Mace
 	email = cameronmace10@gmail.com
-	signingkey = key::ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMtaQBmh0OXKS6I5P+DEZqZWFOzFXfdZ7XlWE3DIZ6n6 Github Signing Key
+	signingkey = ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMtaQBmh0OXKS6I5P+DEZqZWFOzFXfdZ7XlWE3DIZ6n6
 [commit]
 	gpgsign = true
 [gpg "ssh"]
@@ -9,3 +9,8 @@
 [gpg]
 	program = /opt/homebrew/bin/gpg
 	format = ssh
+[filter "lfs"]
+	clean = git-lfs clean -- %f
+	smudge = git-lfs smudge -- %f
+	process = git-lfs filter-process
+	required = true
