@@ -181,7 +181,7 @@ _load_api_keys() {
     fi
     mkdir -p "$(dirname "$cache")"
     local openai anthropic gemini
-    openai=$(op item get 5fuvgno7geha7didmx5hexpgvy --fields label=password --reveal 2>/dev/null)
+    openai=$(op item get hut6y2dh4wt5yrjtqnxywhv3mi --fields 'label=api key' --reveal 2>/dev/null)
     anthropic=$(op item get nywlloca7qjbm3442mo6drpcyi --fields 'label=api key' --reveal 2>/dev/null)
     gemini=$(op item get sqc2tqlqeadyyqsqbt354jxl2q --fields 'label=api key' --reveal 2>/dev/null)
     if [[ -z "$openai" || -z "$anthropic" || -z "$gemini" ]]; then
