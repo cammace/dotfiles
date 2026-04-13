@@ -60,12 +60,17 @@ source $ZSH/oh-my-zsh.sh
 # END OMZ CONFIG
 ###
 
-# Set default editor (VSCode locally, nano over SSH)
+# Set default editor (Zed locally, nano over SSH, fallback to VS Code)
 if [[ -n "$SSH_CONNECTION" ]]; then
     export EDITOR="nano"
+elif command -v zed &>/dev/null; then
+    export EDITOR="zed --wait"
 else
     export EDITOR="code -w"
 fi
+
+# 1Password SSH agent (needed for git commit signing via op-ssh-sign)
+export SSH_AUTH_SOCK=~/Library/Group\ Containers/2BUA8C4S2C.com.1password/t/agent.sock
 
 export PATH="/Users/cameron/.local/bin:$PATH"
 
@@ -73,6 +78,7 @@ export PATH="/Users/cameron/.local/bin:$PATH"
 export PYENV_ROOT="$HOME/.pyenv"
 export PATH="$PYENV_ROOT/bin:$PATH"
 _evalcache pyenv init --path
+_evalcache pyenv init -
 
 # Java (jenv) — cached for fast startup
 export PATH="$HOME/.jenv/bin:$PATH"
@@ -87,6 +93,16 @@ export PATH="$ANDROID_HOME/emulator:$ANDROID_HOME/tools:$ANDROID_HOME/tools/bin:
 
 # Aliases
 alias config="git --git-dir=$HOME/.cfg/ --work-tree=$HOME"
+# Wrap claude to auto-detect dotfiles bare repo when in $HOME
+claude() {
+  if [[ "$PWD" == "$HOME" ]]; then
+    GIT_DIR=$HOME/.cfg GIT_WORK_TREE=$HOME command claude "$@"
+  else
+    command claude "$@"
+  fi
+}
+# alias clio="ssh -t dev-machine 'tmux new-session -A -s clio'"
+alias clio="cd ~/Documents/Clio"
 alias refresh="source ~/.zshrc"
 alias zshconfig="code ~/.zshrc"
 
@@ -164,10 +180,19 @@ _load_api_keys() {
         return
     fi
     mkdir -p "$(dirname "$cache")"
+    local openai anthropic gemini
+    openai=$(op item get 5fuvgno7geha7didmx5hexpgvy --fields label=password --reveal 2>/dev/null)
+    anthropic=$(op item get hbvw7ksgi7fdpu5d3enyu755qm --fields 'label=api key' --reveal 2>/dev/null)
+    gemini=$(op item get wtycgmkdrohgugo33feqqy3tby --fields 'label=api key' --reveal 2>/dev/null)
+    if [[ -z "$openai" || -z "$anthropic" || -z "$gemini" ]]; then
+        echo "_load_api_keys: 1Password fetch failed (openai=${#openai} anthropic=${#anthropic} gemini=${#gemini}); keeping previous cache" >&2
+        [[ -f "$cache" ]] && source "$cache"
+        return 1
+    fi
     {
-        echo "export OPENAI_API_KEY=\"$(op item get 5fuvgno7geha7didmx5hexpgvy --fields label=password --reveal)\""
-        echo "export ANTHROPIC_API_KEY=\"$(op item get hbvw7ksgi7fdpu5d3enyu755qm --fields 'label=api key' --reveal)\""
-        echo "export GEMINI_API_KEY=\"$(op item get wtycgmkdrohgugo33feqqy3tby --fields 'label=api key' --reveal)\""
+        echo "export OPENAI_API_KEY=\"$openai\""
+        echo "export ANTHROPIC_API_KEY=\"$anthropic\""
+        echo "export GEMINI_API_KEY=\"$gemini\""
     } > "$cache"
     chmod 600 "$cache"
     source "$cache"
@@ -179,22 +204,33 @@ PAGER=cat
 GH_PAGER=cat
 
 export PATH="/opt/homebrew/opt/ruby/bin:$PATH"
-export PATH="/opt/homebrew/lib/ruby/gems/3.4.0/bin:$PATH"
+export PATH="$(ruby -e 'puts Gem.default_bindir'):$PATH"
 export PATH="/opt/homebrew/opt/libpq/bin:$PATH"
 
 # Added by Antigravity
 export PATH="/Users/cameron/.antigravity/antigravity/bin:$PATH"
 
-export GITHUB_TOKEN="$(gh auth token)"
 
 export CLAUDE_CODE_THEME=dark
 
-# zoxide — must be initialized at the end of .zshrc
-_evalcache zoxide init --cmd cd zsh
-
 # Launch tmux session picker on SSH login (Termius/Tailscale)
+# If the picker exits without selecting a session (q to quit), disconnect
 if [[ -n "$SSH_CONNECTION" && -z "$TMUX" && $- == *i* ]]; then
-    ~/tmux_picker.sh
+    ~/tmux_picker.sh || true
+    [[ -z "$TMUX" ]] && exit
 fi
 
 alias sessions="~/tmux_picker.sh"
+
+# zoxide — must be initialized at the end of .zshrc
+export _ZO_DOCTOR=0
+_evalcache zoxide init --cmd cd zsh
+
+# # OpenClaw Completion
+# source "/Users/cameron/.openclaw/completions/openclaw.zsh"
+
+# opencode
+export PATH=/Users/cameron/.opencode/bin:$PATH
+
+# Clio env (managed by setup/bootstrap.sh — safe to remove)
+[ -f "$HOME/.clio/env" ] && source "$HOME/.clio/env"
