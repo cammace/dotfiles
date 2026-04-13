@@ -182,8 +182,8 @@ _load_api_keys() {
     mkdir -p "$(dirname "$cache")"
     local openai anthropic gemini
     openai=$(op item get 5fuvgno7geha7didmx5hexpgvy --fields label=password --reveal 2>/dev/null)
-    anthropic=$(op item get hbvw7ksgi7fdpu5d3enyu755qm --fields 'label=api key' --reveal 2>/dev/null)
-    gemini=$(op item get wtycgmkdrohgugo33feqqy3tby --fields 'label=api key' --reveal 2>/dev/null)
+    anthropic=$(op item get nywlloca7qjbm3442mo6drpcyi --fields 'label=api key' --reveal 2>/dev/null)
+    gemini=$(op item get sqc2tqlqeadyyqsqbt354jxl2q --fields 'label=api key' --reveal 2>/dev/null)
     if [[ -z "$openai" || -z "$anthropic" || -z "$gemini" ]]; then
         echo "_load_api_keys: 1Password fetch failed (openai=${#openai} anthropic=${#anthropic} gemini=${#gemini}); keeping previous cache" >&2
         [[ -f "$cache" ]] && source "$cache"
