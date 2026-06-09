@@ -189,6 +189,9 @@ load-ai-keys() {
     [[ -n "$ANTHROPIC_API_KEY" ]] || export ANTHROPIC_API_KEY="$(op read 'op://AI/Anthropic API Key/api key' 2>/dev/null)"
     [[ -n "$GEMINI_API_KEY"    ]] || export GEMINI_API_KEY="$(op read 'op://AI/Gemini API Key/api key' 2>/dev/null)"
 }
+# Note: `td` (Todoist CLI) reads its token from the macOS Keychain, not env/1Password.
+# Source of truth is op://AI/Todoist API Key/api key. Re-provision on a new machine:
+#   td auth token "$(op read 'op://AI/Todoist API Key/api key')"
 
 export PAGER=cat
 export GH_PAGER=cat
