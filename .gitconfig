@@ -7,10 +7,40 @@
 [gpg "ssh"]
 	program = /Applications/1Password.app/Contents/MacOS/op-ssh-sign
 [gpg]
-	program = /opt/homebrew/bin/gpg
 	format = ssh
 [filter "lfs"]
 	clean = git-lfs clean -- %f
 	smudge = git-lfs smudge -- %f
 	process = git-lfs filter-process
 	required = true
+[credential "https://github.com"]
+	helper = 
+	helper = !/opt/homebrew/bin/gh auth git-credential
+[credential "https://gist.github.com"]
+	helper = 
+	helper = !/opt/homebrew/bin/gh auth git-credential
+[core]
+	editor = zed --wait
+[push]
+	autoSetupRemote = true
+	default = simple
+[fetch]
+	prune = true
+[pull]
+	rebase = true
+[rerere]
+	enabled = true
+[init]
+	defaultBranch = main
+[diff]
+	algorithm = histogram
+[branch]
+	sort = -committerdate
+[column]
+	ui = auto
+[includeIf "hasconfig:remote.*.url:git@github.com:commhospital/**"]
+	path = ~/.gitconfig-work
+[includeIf "hasconfig:remote.*.url:https://github.com/commhospital/**"]
+	path = ~/.gitconfig-work
+[includeIf "hasconfig:remote.*.url:https://*@github.com/commhospital/**"]
+	path = ~/.gitconfig-work

@@ -6,3 +6,5 @@ export PATH="$PATH:/Users/cameron/Library/Application Support/JetBrains/Toolbox/
 
 # Added by Obsidian
 export PATH="$PATH:/Applications/Obsidian.app/Contents/MacOS"
+
+# Note: ~/.local/bin is already prepended in .zshenv (sourced for all shells).

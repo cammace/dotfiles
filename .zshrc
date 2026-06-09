@@ -15,13 +15,7 @@ fpath=("$HOME/.docker/completions" $fpath)
 # Oh My Zsh Plugins
 # Order matters: fzf-tab after compinit (OMZ handles this), before autosuggestions/highlighting
 plugins=(
-  1password
   aws
-  gradle
-  git
-  docker
-  docker-compose
-  kubectl
   brew
   npm
   yarn
@@ -31,13 +25,15 @@ plugins=(
   macos
   colored-man-pages
   direnv
-  history-substring-search
   evalcache
   fzf-tab
   you-should-use
   zsh-autosuggestions
   fast-syntax-highlighting
 )
+# Removed (2026-06-09 audit): kubectl, gradle (0 uses, slow completion),
+# docker, docker-compose (redundant — official _docker completion is in fpath above),
+# git (its aliases unused; git completion is native to zsh)
 
 # History
 HISTSIZE=1000000
@@ -60,19 +56,17 @@ source $ZSH/oh-my-zsh.sh
 # END OMZ CONFIG
 ###
 
-# Set default editor (Zed locally, nano over SSH, fallback to VS Code)
+# Set default editor (Zed locally, nano over SSH)
 if [[ -n "$SSH_CONNECTION" ]]; then
     export EDITOR="nano"
 elif command -v zed &>/dev/null; then
     export EDITOR="zed --wait"
 else
-    export EDITOR="code -w"
+    export EDITOR="nano"
 fi
 
 # 1Password SSH agent (needed for git commit signing via op-ssh-sign)
 export SSH_AUTH_SOCK=~/Library/Group\ Containers/2BUA8C4S2C.com.1password/t/agent.sock
-
-export PATH="/Users/cameron/.local/bin:$PATH"
 
 # Python (pyenv) — cached for fast startup
 export PYENV_ROOT="$HOME/.pyenv"
@@ -84,12 +78,11 @@ _evalcache pyenv init -
 export PATH="$HOME/.jenv/bin:$PATH"
 _evalcache jenv init -
 
-# Android SDK paths
-export ANDROID_HOME="$HOME/Library/Android/Sdk"
-export PATH="$ANDROID_HOME/emulator:$ANDROID_HOME/tools:$ANDROID_HOME/tools/bin:$ANDROID_HOME/platform-tools:$PATH"
-
 # iTerm2 Integration
 [[ -f "$HOME/.iterm2_shell_integration.zsh" ]] && source "$HOME/.iterm2_shell_integration.zsh"
+
+# Raise file descriptor limit (Claude Code fails with "unlimited" — needs explicit number)
+ulimit -n 65536
 
 # Aliases
 alias config="git --git-dir=$HOME/.cfg/ --work-tree=$HOME"
@@ -102,9 +95,14 @@ claude() {
   fi
 }
 # alias clio="ssh -t dev-machine 'tmux new-session -A -s clio'"
-alias clio="cd ~/Documents/Clio"
+alias clio="cd ~/Documents/Clio && claude --dangerously-skip-permissions"
 alias refresh="source ~/.zshrc"
+# Clear evalcache (pyenv/jenv/starship/zoxide). Run after a `brew upgrade` if a
+# new shell errors with "no such file" pointing at an old versioned Cellar path.
+evalcache-clear() { rm -f "$HOME/.zsh-evalcache/"*.sh "$HOME/.zsh-evalcache/"*.zwc && echo "evalcache cleared — open a new shell to rebuild"; }
 alias zshconfig="code ~/.zshrc"
+alias h="ssh h"
+alias hermes="ssh h"
 
 # eza (replaces ls)
 alias ls='eza --group-directories-first'
@@ -122,7 +120,7 @@ _evalcache starship init zsh
 ZSH_AUTOSUGGEST_HIGHLIGHT_STYLE="fg=#4c566a"
 
 # CLI Tools — cached for fast startup
-source <(fzf --zsh)
+_evalcache fzf --zsh
 
 # fzf configuration with fd/bat/eza previews
 export FZF_DEFAULT_COMMAND='fd --type f --hidden --follow --exclude .git'
@@ -160,48 +158,34 @@ zstyle ':completion:*:default' list-colors ${(s.:.)LS_COLORS}
 zstyle ':completion:*' use-cache on
 zstyle ':completion:*' cache-path "$HOME/.zcompcache"
 
-# History substring search key bindings (Up/Down arrows)
-bindkey '^[[A' history-substring-search-up
-bindkey '^[[B' history-substring-search-down
+# Prefix-aware history search on Up/Down (native zsh — replaces history-substring-search).
+# Type a prefix, press Up: cycles only through history lines starting with it.
+autoload -Uz up-line-or-beginning-search down-line-or-beginning-search
+zle -N up-line-or-beginning-search
+zle -N down-line-or-beginning-search
+bindkey '^[[A' up-line-or-beginning-search
+bindkey '^[[B' down-line-or-beginning-search
 
-# API keys via 1Password (cached for 24h to avoid login prompts on every tab)
-_load_api_keys() {
-    local cache="$HOME/.cache/op-api-keys"
-    local max_age=86400
-    if [[ -f "$cache" ]]; then
-        local file_age=$(( $(date +%s) - $(stat -f %m "$cache") ))
-        if (( file_age < max_age )); then
-            source "$cache"
-            return
-        fi
-    fi
-    if ! op account get &>/dev/null; then
-        [[ -f "$cache" ]] && source "$cache"
-        return
-    fi
-    mkdir -p "$(dirname "$cache")"
-    local openai anthropic gemini
-    openai=$(op item get hut6y2dh4wt5yrjtqnxywhv3mi --fields 'label=api key' --reveal 2>/dev/null)
-    anthropic=$(op item get nywlloca7qjbm3442mo6drpcyi --fields 'label=api key' --reveal 2>/dev/null)
-    gemini=$(op item get sqc2tqlqeadyyqsqbt354jxl2q --fields 'label=api key' --reveal 2>/dev/null)
-    if [[ -z "$openai" || -z "$anthropic" || -z "$gemini" ]]; then
-        echo "_load_api_keys: 1Password fetch failed (openai=${#openai} anthropic=${#anthropic} gemini=${#gemini}); keeping previous cache" >&2
-        [[ -f "$cache" ]] && source "$cache"
-        return 1
-    fi
-    {
-        echo "export OPENAI_API_KEY=\"$openai\""
-        echo "export ANTHROPIC_API_KEY=\"$anthropic\""
-        echo "export GEMINI_API_KEY=\"$gemini\""
-    } > "$cache"
-    chmod 600 "$cache"
-    source "$cache"
+# 1Password service account — read-only access to AI + Homelab vaults.
+# Token lives in macOS Keychain (unlocked at login, no biometric prompt).
+# To rotate: generate a new SA token at 1password.com/developer, then:
+#   security add-generic-password -U -s op-service-account -a homelab-ai -T /usr/bin/security \
+#     -w "$(op item get puelzwd65pdakekao3k2ejztom --fields credential --reveal --vault Private)"
+export OP_SERVICE_ACCOUNT_TOKEN="$(security find-generic-password -s op-service-account -a homelab-ai -w 2>/dev/null)"
+
+# AI API keys — LAZY-loaded on demand. Each `op read` is a ~0.5s network call;
+# fetching all three at every shell start cost ~1.4s. They're rarely needed
+# interactively, so populate on demand with `load-ai-keys` (no on-disk cache).
+# Homelab secrets (Unifi, HA, etc.) are NOT exported; scripts call `op read` inline.
+load-ai-keys() {
+    [[ -n "$OP_SERVICE_ACCOUNT_TOKEN" ]] || { print -u2 "load-ai-keys: no OP_SERVICE_ACCOUNT_TOKEN"; return 1; }
+    [[ -n "$OPENAI_API_KEY"    ]] || export OPENAI_API_KEY="$(op read 'op://AI/Open AI API Key/api key' 2>/dev/null)"
+    [[ -n "$ANTHROPIC_API_KEY" ]] || export ANTHROPIC_API_KEY="$(op read 'op://AI/Anthropic API Key/api key' 2>/dev/null)"
+    [[ -n "$GEMINI_API_KEY"    ]] || export GEMINI_API_KEY="$(op read 'op://AI/Gemini API Key/api key' 2>/dev/null)"
 }
-_load_api_keys
-alias refresh-keys='rm -f ~/.cache/op-api-keys && _load_api_keys'
 
-PAGER=cat
-GH_PAGER=cat
+export PAGER=cat
+export GH_PAGER=cat
 
 export PATH="/opt/homebrew/opt/ruby/bin:$PATH"
 export PATH="$(ruby -e 'puts Gem.default_bindir'):$PATH"
@@ -234,3 +218,5 @@ export PATH=/Users/cameron/.opencode/bin:$PATH
 
 # Clio env (managed by setup/bootstrap.sh — safe to remove)
 [ -f "$HOME/.clio/env" ] && source "$HOME/.clio/env"
+
+export GOOGLE_SERVICE_ACCOUNT_KEY="$HOME/.config/commhospital/sa-key.json"

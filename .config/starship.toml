@@ -5,6 +5,7 @@ $username\
 $hostname\
 $directory\
 $git_branch\
+$git_state\
 $git_status\
 $line_break\
 $character"""
@@ -54,6 +55,10 @@ format = "[$symbol$branch]($style) "
 symbol = " "
 style = "purple"
 truncation_length = 24
+
+[git_state]
+format = '[\($state( $progress_current/$progress_total)\)]($style) '
+style = "bold yellow"
 
 [git_status]
 format = '([$all_status$ahead_behind]($style) )'
