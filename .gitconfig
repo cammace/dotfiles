@@ -6,6 +6,7 @@
 	gpgsign = true
 [gpg "ssh"]
 	program = /Applications/1Password.app/Contents/MacOS/op-ssh-sign
+	allowedSignersFile = ~/.config/git/allowed_signers
 [gpg]
 	format = ssh
 [filter "lfs"]
