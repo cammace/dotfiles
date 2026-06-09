@@ -86,10 +86,16 @@ ulimit -n 65536
 
 # Aliases
 alias config="git --git-dir=$HOME/.cfg/ --work-tree=$HOME"
-# Wrap claude to auto-detect dotfiles bare repo when in $HOME
+# Expose the dotfiles bare repo to Claude when launched from $HOME — WITHOUT
+# exporting GIT_DIR/GIT_WORK_TREE. Those get inherited by every child shell for
+# the whole session and hijack git's repo discovery in any OTHER repo Claude
+# touches (e.g. ~/Documents/Clio needed `env -u GIT_DIR` to commit). Pass a hint
+# var instead; Claude uses `git --git-dir="$CLAUDE_DOTFILES_GIT_DIR"
+# --work-tree="$CLAUDE_DOTFILES_WORK_TREE"` (or the `config` alias) for dotfiles,
+# and plain `git` works normally everywhere else.
 claude() {
   if [[ "$PWD" == "$HOME" ]]; then
-    GIT_DIR=$HOME/.cfg GIT_WORK_TREE=$HOME command claude "$@"
+    CLAUDE_DOTFILES_GIT_DIR="$HOME/.cfg" CLAUDE_DOTFILES_WORK_TREE="$HOME" command claude "$@"
   else
     command claude "$@"
   fi
