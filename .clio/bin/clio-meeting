@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+# clio-meeting — dispatcher for the meeting recording pipeline.
+# Subcommands: start, stop, process, status.
+set -euo pipefail
+
+CMD="${1:-help}"
+shift || true
+
+case "$CMD" in
+  start|stop|process|status)
+    exec "clio-meeting-$CMD" "$@"
+    ;;
+  help|--help|-h)
+    cat <<'EOF'
+Usage: clio-meeting <subcommand> [args]
+
+Subcommands:
+  start [--title T] [--attendees "Alice,Bob"]
+                   Start a new recording. Prints the session ID.
+  stop             Stop the active recording and hand off to the pipeline.
+  process <id>     Re-run the pipeline on a past session (ID or path).
+  status           Show active recording + recent sessions.
+
+Env (source ~/.clio/env):
+  CLIO_MEETING_DIR, CLIO_MEETING_VAULT,
+  CLIO_MEETING_WHISPERX_MODEL, CLIO_MEETING_HF_TOKEN,
+  CLIO_MEETING_CLAUDE_MODEL
+Secrets (via 1Password SA token in ~/.zshrc):
+  ANTHROPIC_API_KEY (exported at shell start)
+EOF
+    ;;
+  *)
+    echo "Unknown subcommand: $CMD" >&2
+    exec "$0" help
+    ;;
+esac

@@ -1,0 +1,693 @@
+#!/usr/bin/env python3
+"""
+Clio Granola Fetch — read Granola's auth token from the desktop app's
+stored-accounts.json, list recent docs via the Granola API, and convert
+their transcripts to WebVTT so the existing meeting pipeline ingests them
+unchanged.
+
+Used both as a library (by `clio-meeting-router`) and as a CLI for testing:
+
+    clio-granola-fetch --list-hours 24
+    clio-granola-fetch --doc-id <uuid> --as-vtt
+
+Auth model:
+  - **Preferred (since 2026-05-27):** read a long-lived Granola API key from the
+    `CLIO_GRANOLA_API_KEY` (or `GRANOLA_API_KEY`) env var. Generated in Granola
+    desktop → Settings → API → API keys. Use as a Bearer token against the
+    same `api.granola.ai` endpoints. No refresh dance, no desktop-app coupling.
+  - **Legacy fallback:** read `access_token` from `~/Library/Application
+    Support/Granola/stored-accounts.json` (Granola < 7.269.0 only). Broken on
+    current Granola (token moved to safeStorage at-rest). Kept so the script
+    still works as a CLI for one-off testing in older environments.
+
+This is read-only against Granola's normal API surface; it does the same
+calls the desktop app makes during routine sync.
+"""
+from __future__ import annotations
+
+import argparse
+import base64
+import gzip
+import importlib.util
+import json
+import os
+import re
+import sys
+import time
+import urllib.error
+import urllib.request
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+ACCOUNTS_PATH = Path.home() / "Library" / "Application Support" / "Granola" / "stored-accounts.json"
+API_BASE = "https://api.granola.ai"
+AUTH_BASE = "https://auth.granola.ai"
+USER_AGENT = "Granola/6.4.0 (clio-router)"
+
+# MCP path (preferred since 2026-05-27 — Granola moved auth to OAuth 2.0).
+MCP_URL = "https://mcp.granola.ai/mcp"
+OAUTH_STATE_PATH = Path.home() / ".clio" / "granola-oauth.json"
+OAUTH_HELPER_PATH = Path.home() / ".clio" / "bin" / "clio-granola-oauth"
+
+
+def _use_mcp() -> bool:
+    """Route via Granola MCP if OAuth state exists. Falls back to legacy
+    desktop-API path otherwise (which is broken on Granola >= 7.269.0)."""
+    if os.environ.get("CLIO_GRANOLA_FORCE_LEGACY") == "1":
+        return False
+    return OAUTH_STATE_PATH.exists() and OAUTH_HELPER_PATH.exists()
+
+
+_oauth_mod = None
+def _load_oauth_mod():
+    """Lazy-load clio-granola-oauth as a Python module so we can call its
+    get_access_token() helper directly without shelling out. The helper file
+    has no .py extension, so we use SourceFileLoader explicitly."""
+    global _oauth_mod
+    if _oauth_mod is None:
+        import importlib.machinery
+        loader = importlib.machinery.SourceFileLoader("granola_oauth", str(OAUTH_HELPER_PATH))
+        spec = importlib.util.spec_from_loader("granola_oauth", loader)
+        if spec is None:
+            raise RuntimeError(f"Could not load OAuth helper at {OAUTH_HELPER_PATH}")
+        _oauth_mod = importlib.util.module_from_spec(spec)
+        loader.exec_module(_oauth_mod)
+    return _oauth_mod
+
+
+def _b64url_decode(s: str) -> bytes:
+    s += "=" * (-len(s) % 4)
+    return base64.urlsafe_b64decode(s)
+
+
+def _jwt_payload(token: str) -> dict:
+    try:
+        return json.loads(_b64url_decode(token.split(".")[1]))
+    except Exception:
+        return {}
+
+
+def _read_accounts() -> tuple[dict, dict, dict]:
+    """Return (outer_doc, account, tokens) — outer is parsed stored-accounts.json,
+    account is accounts[0] (dict), tokens is the parsed tokens blob."""
+    outer = json.loads(ACCOUNTS_PATH.read_text())
+    accounts = json.loads(outer["accounts"])
+    acct = accounts[0]
+    tokens = json.loads(acct["tokens"])
+    return outer, acct, tokens
+
+
+def _write_accounts(outer: dict, acct: dict, tokens: dict) -> None:
+    """Persist the rotated token pair back into stored-accounts.json without
+    disturbing other fields. Mirrors the app's nested-JSON encoding."""
+    acct["tokens"] = json.dumps(tokens)
+    accounts = json.loads(outer["accounts"])
+    accounts[0] = acct
+    outer["accounts"] = json.dumps(accounts)
+    ACCOUNTS_PATH.write_text(json.dumps(outer))
+
+
+def _refresh_token(tokens: dict) -> dict:
+    """Refresh against WorkOS. Returns a new tokens dict matching the app's
+    schema (access_token, refresh_token, expires_in, token_type, obtained_at,
+    session_id, external_id, sign_in_method)."""
+    payload = _jwt_payload(tokens["access_token"])
+    client_id = payload.get("client_id")
+    if not client_id:
+        raise RuntimeError("Could not parse client_id from access_token JWT")
+    body = json.dumps({
+        "client_id": client_id,
+        "grant_type": "refresh_token",
+        "refresh_token": tokens["refresh_token"],
+    }).encode()
+    req = urllib.request.Request(
+        f"{AUTH_BASE}/user_management/authenticate",
+        data=body, method="POST",
+        headers={"Content-Type": "application/json", "User-Agent": USER_AGENT})
+    with urllib.request.urlopen(req, timeout=20) as r:
+        resp = json.loads(r.read())
+    new_payload = _jwt_payload(resp["access_token"])
+    expires_in = max(60, int(new_payload.get("exp", 0)) - int(time.time())) if new_payload.get("exp") else 21599
+    return {
+        **tokens,
+        "access_token": resp["access_token"],
+        "refresh_token": resp["refresh_token"],
+        "expires_in": expires_in,
+        "token_type": "Bearer",
+        "obtained_at": int(time.time() * 1000),
+    }
+
+
+def _api_key_from_env() -> str | None:
+    """Return the Granola API key from env, or None if not configured.
+    Preferred path since 2026-05-27 — long-lived key generated in Granola
+    desktop → Settings → API → API keys."""
+    return os.environ.get("CLIO_GRANOLA_API_KEY") or os.environ.get("GRANOLA_API_KEY")
+
+
+def get_access_token(refresh_within_seconds: int = 300) -> str:
+    """Return a valid Granola bearer token.
+
+    Preferred: long-lived API key from env (CLIO_GRANOLA_API_KEY).
+    Fallback: legacy WorkOS access_token from stored-accounts.json, with
+    in-place refresh against WorkOS if expiring. Broken on Granola >= 7.269.0
+    (token moved to safeStorage); kept only for legacy compatibility."""
+    api_key = _api_key_from_env()
+    if api_key:
+        return api_key
+    outer, acct, tokens = _read_accounts()
+    exp_ms = tokens.get("obtained_at", 0) + tokens.get("expires_in", 0) * 1000
+    if exp_ms - int(time.time() * 1000) > refresh_within_seconds * 1000:
+        return tokens["access_token"]
+    new_tokens = _refresh_token(tokens)
+    _write_accounts(outer, acct, new_tokens)
+    return new_tokens["access_token"]
+
+
+def _api(path: str, payload: dict | None = None, token: str | None = None) -> dict | list:
+    tk = token or get_access_token()
+    data = json.dumps(payload).encode() if payload is not None else None
+    method = "POST" if payload is not None else "GET"
+    req = urllib.request.Request(
+        f"{API_BASE}{path}", data=data, method=method,
+        headers={
+            "Authorization": f"Bearer {tk}",
+            "Content-Type": "application/json",
+            "User-Agent": USER_AGENT,
+        })
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            raw = r.read()
+    except urllib.error.HTTPError as e:
+        body = e.read().decode("utf-8", errors="ignore")[:500]
+        raise RuntimeError(f"Granola {e.code} on {path}: {body}") from None
+    if raw[:2] == b"\x1f\x8b":
+        raw = gzip.decompress(raw)
+    return json.loads(raw)
+
+
+def list_documents(limit: int = 100, offset: int = 0) -> list[dict]:
+    resp = _api("/v2/get-documents", {"limit": limit, "offset": offset})
+    if isinstance(resp, dict):
+        return resp.get("docs") or []
+    return []
+
+
+# -------------------------- MCP path -----------------------------------------
+
+# Common North-American time-zone abbreviations the Granola MCP emits in its
+# date strings. UTC offsets in seconds for dateutil.tzinfos.
+_TZ_OFFSETS_S = {
+    "EDT": -4 * 3600, "EST": -5 * 3600,
+    "CDT": -5 * 3600, "CST": -6 * 3600,
+    "MDT": -6 * 3600, "MST": -7 * 3600,
+    "PDT": -7 * 3600, "PST": -8 * 3600,
+    "AKDT": -8 * 3600, "AKST": -9 * 3600,
+    "HST": -10 * 3600, "UTC": 0, "GMT": 0,
+}
+
+
+def _parse_granola_date(s: str) -> datetime | None:
+    """Parse Granola's MCP date strings like 'May 26, 2026 11:00 AM EDT' to a
+    UTC-aware datetime. Returns None if parsing fails."""
+    if not s:
+        return None
+    try:
+        from dateutil import parser as _du_parser  # stdlib-adjacent on macOS
+    except ImportError:
+        return None
+    try:
+        dt = _du_parser.parse(s, tzinfos=_TZ_OFFSETS_S)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
+    except Exception:
+        return None
+
+
+def _mcp_call(method: str, params: dict | None = None) -> dict:
+    """JSON-RPC call against Granola's MCP server, bearer-auth from the OAuth
+    helper. The MCP returns {content: [{type:'text', text:'...'}, ...]} for
+    tool calls; we don't unwrap here, callers do."""
+    oauth = _load_oauth_mod()
+    token = oauth.get_access_token()
+    body = json.dumps({
+        "jsonrpc": "2.0",
+        "id": int(time.time() * 1000),
+        "method": method,
+        "params": params or {},
+    }).encode()
+    req = urllib.request.Request(
+        MCP_URL, data=body,
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+            "Accept": "application/json, text/event-stream",
+            "MCP-Protocol-Version": "2024-11-05",
+        }, method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            raw = r.read()
+    except urllib.error.HTTPError as e:
+        raise RuntimeError(f"MCP {e.code} on {method}: {e.read().decode()[:300]}") from None
+    text = raw.decode("utf-8", errors="replace")
+    if text.startswith("event:") or "\ndata: " in text:
+        for line in text.splitlines():
+            if line.startswith("data: "):
+                payload = json.loads(line[6:])
+                break
+        else:
+            raise RuntimeError(f"SSE response had no data line: {text[:200]}")
+    else:
+        payload = json.loads(text)
+    if "error" in payload:
+        raise RuntimeError(f"MCP error on {method}: {payload['error']}")
+    return payload.get("result", payload)
+
+
+def _mcp_tool_text(tool_result: dict) -> str:
+    """Extract the concatenated text from MCP {content: [{type:'text', text:...}]}."""
+    parts = []
+    for block in tool_result.get("content", []) or []:
+        if block.get("type") == "text":
+            parts.append(block.get("text", ""))
+    return "".join(parts)
+
+
+def _parse_mcp_meetings_xml(xml_text: str) -> list[dict]:
+    """Parse the <meetings_data>…<meeting/>…</meetings_data> blob the MCP
+    returns into normalized doc dicts matching the desktop-API contract.
+
+    Missing-from-MCP fields (filled with sensible defaults):
+      - ical_uid, join_url → None
+      - end → start + 30 min (assumed)
+      - valid_meeting → True (MCP filters to real meetings already)
+      - meeting_ended → True (only ended meetings show up in list_meetings)
+      - transcript_deleted → False
+    """
+    docs: list[dict] = []
+    # Greedy capture of <meeting id="..." title="..." date="..."> attributes
+    # and the <known_participants> body.
+    pattern = re.compile(
+        r'<meeting\s+id="(?P<id>[^"]+)"\s+title="(?P<title>[^"]*)"\s+date="(?P<date>[^"]+)">'
+        r'(?P<body>.*?)</meeting>',
+        re.DOTALL,
+    )
+    for m in pattern.finditer(xml_text):
+        start = _parse_granola_date(m.group("date"))
+        end = (start + timedelta(minutes=30)) if start else None
+        # Participants list inside <known_participants>…</known_participants>
+        attendees: list[str] = []
+        kp_match = re.search(
+            r"<known_participants>\s*(.*?)\s*</known_participants>",
+            m.group("body"), re.DOTALL,
+        )
+        if kp_match:
+            raw = kp_match.group(1).strip()
+            for chunk in re.split(r",\s*(?=[A-Z])", raw):
+                chunk = chunk.strip()
+                if not chunk:
+                    continue
+                # Strip parenthetical "(note creator)" + "from Org" suffix +
+                # "<email>" suffix; keep just the display name.
+                nm = re.sub(r"\s*\([^)]*\)", "", chunk)
+                nm = re.sub(r"\s+from\s+\S+", "", nm)
+                nm = re.sub(r"\s*<[^>]+>\s*$", "", nm).strip()
+                if nm:
+                    attendees.append(nm)
+        docs.append({
+            "id": m.group("id"),
+            "title": (m.group("title") or "Untitled meeting").strip(),
+            "start": start,
+            "end": end,
+            "created_at": start,    # MCP doesn't separate created_at from start
+            "ical_uid": None,
+            "join_url": None,
+            "attendees": attendees,
+            "valid_meeting": True,
+            "transcript_deleted": False,
+            "meeting_ended": True,
+            "_raw": {"mcp_source": True, "date_str": m.group("date")},
+        })
+    return docs
+
+
+def _mcp_list_meetings(hours_back: int) -> list[dict]:
+    """MCP path for list_recent_meetings().
+
+    Granola's MCP `list_meetings` only accepts a coarse enum `time_range`
+    (`this_week` | `last_week` | `last_30_days`) — the older `custom` +
+    `custom_start`/`custom_end` range was removed (observed broken 2026-06-29;
+    the tool returned an enum-validation error as *text content*, which the XML
+    parser silently read as zero meetings, so the router reported "0 doc(s)"
+    and imported nothing since the Granola-side change ~2026-06-23).
+
+    We query `last_30_days` (the broadest enum; cheap — a couple dozen docs)
+    and filter client-side to the precise rolling `hours_back` window on each
+    doc's start time, mirroring the legacy desktop-API path's `created_at`
+    cutoff. The calendar-relative enums (`this_week`/`last_week`) are avoided
+    because a 24h rolling lookback would miss meetings across a week boundary."""
+    res = _mcp_call("tools/call", {
+        "name": "list_meetings",
+        "arguments": {"time_range": "last_30_days"},
+    })
+    docs = _parse_mcp_meetings_xml(_mcp_tool_text(res))
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=hours_back)
+    return [d for d in docs if d.get("start") and d["start"] >= cutoff]
+
+
+def _mcp_fetch_transcript(doc_id: str) -> list[dict]:
+    """MCP path for fetch_transcript(). Parses the JSON-in-text wrapper and
+    splits Me:/Them: turns into segments with synthesized timestamps so the
+    downstream WebVTT generator stays unchanged.
+
+    Speech-rate assumption: ~16 chars/sec (≈180 wpm × 5.2 chars/word avg)."""
+    res = _mcp_call("tools/call", {
+        "name": "get_meeting_transcript",
+        "arguments": {"meeting_id": doc_id},
+    })
+    payload_text = _mcp_tool_text(res)
+    try:
+        payload = json.loads(payload_text)
+    except json.JSONDecodeError:
+        return []
+    flat = payload.get("transcript") or ""
+    if not flat:
+        return []
+
+    # Split on "Me:" or "Them:" boundaries; preserve which speaker.
+    # Pattern finds the speaker tag and captures the text up to the next tag.
+    chunks = re.findall(
+        r"\b(Me|Them):\s+(.*?)(?=\s+\b(?:Me|Them):|$)",
+        flat, re.DOTALL,
+    )
+
+    segments: list[dict] = []
+    char_cursor = 0
+    CHARS_PER_SEC = 16.0
+    for speaker, text in chunks:
+        text = text.strip()
+        if not text:
+            char_cursor += len(text) + 5  # rough whitespace accounting
+            continue
+        start_s = char_cursor / CHARS_PER_SEC
+        end_s = (char_cursor + len(text)) / CHARS_PER_SEC
+        # Build pseudo-ISO timestamps anchored at epoch — transcript_to_vtt
+        # only cares about deltas from segment 0.
+        base = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        segments.append({
+            "start_timestamp": (base + timedelta(seconds=start_s)).isoformat().replace("+00:00", "Z"),
+            "end_timestamp": (base + timedelta(seconds=end_s)).isoformat().replace("+00:00", "Z"),
+            "text": text,
+            "source": "microphone" if speaker == "Me" else "system",
+            "is_final": True,
+            "detected_speaker_name": None,
+        })
+        char_cursor += len(text) + len(speaker) + 2  # "Me: " / "Them: " separator
+    return segments
+
+
+def _doc_join_url(doc: dict) -> str | None:
+    gc = doc.get("google_calendar_event") or {}
+    ep = ((gc.get("conferenceData") or {}).get("entryPoints") or [])
+    for e in ep:
+        uri = e.get("uri", "")
+        if "teams.microsoft.com" in uri or "teams.live.com" in uri:
+            return uri
+    # Microsoft Teams' conference link sometimes lives at top-level hangoutLink
+    return gc.get("hangoutLink")
+
+
+def _parse_dt(s):
+    if not s:
+        return None
+    s = s.replace("Z", "+00:00")
+    try:
+        return datetime.fromisoformat(s).astimezone(timezone.utc)
+    except Exception:
+        return None
+
+
+def _doc_start_end(doc: dict) -> tuple[datetime | None, datetime | None]:
+    """Calendar-event start/end (when present). Used for matching to Teams
+    events — NOT for lookback windowing (use created_at for that, since the
+    calendar event for a recurring series points at the next occurrence)."""
+    gc = doc.get("google_calendar_event") or {}
+    start = ((gc.get("start") or {}).get("dateTime"))
+    end = ((gc.get("end") or {}).get("dateTime"))
+    if not start:
+        start = doc.get("created_at")
+    return _parse_dt(start), _parse_dt(end)
+
+
+def normalize_doc(doc: dict) -> dict:
+    """Project a Granola doc into the same shape the router uses for events."""
+    start, end = _doc_start_end(doc)
+    gc = doc.get("google_calendar_event") or {}
+    attendees = []
+    for a in (gc.get("attendees") or []):
+        nm = a.get("displayName") or a.get("email")
+        if nm:
+            attendees.append(nm)
+    if not attendees:
+        for p in (doc.get("people") or []):
+            nm = p.get("name") or p.get("email")
+            if nm:
+                attendees.append(nm)
+    return {
+        "id": doc["id"],
+        "title": doc.get("title") or gc.get("summary") or "Untitled meeting",
+        "start": start,
+        "end": end,
+        "created_at": _parse_dt(doc.get("created_at")),
+        "ical_uid": gc.get("iCalUID"),
+        "join_url": _doc_join_url(doc),
+        "attendees": attendees,
+        "valid_meeting": bool(doc.get("valid_meeting")),
+        "transcript_deleted": doc.get("transcript_deleted_at") is not None,
+        "meeting_ended": (doc.get("meeting_end_count") or 0) >= 1,
+        "_raw": doc,
+    }
+
+
+def list_recent_meetings(hours_back: int = 24, pages: int = 3) -> list[dict]:
+    """Return normalized docs whose created_at is within the lookback window,
+    that look like real meetings (valid_meeting + ended), and that still have
+    transcripts (not transcript_deleted_at).
+
+    Lookback anchors on created_at (when Granola began recording), NOT the
+    calendar event's start — recurring-series docs point start at the next
+    occurrence, which would falsely include future meetings.
+
+    Dispatches to MCP when OAuth state is available (default since 2026-05-27);
+    falls back to the legacy desktop-API path otherwise."""
+    if _use_mcp():
+        return _mcp_list_meetings(hours_back)
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=hours_back)
+    out: list[dict] = []
+    for page in range(pages):
+        docs = list_documents(limit=100, offset=page * 100)
+        if not docs:
+            break
+        page_norm = [normalize_doc(d) for d in docs]
+        out.extend(page_norm)
+        created = [d["created_at"] for d in page_norm if d["created_at"]]
+        if created and min(created) < cutoff:
+            break
+    return [d for d in out
+            if d["created_at"] and d["created_at"] >= cutoff
+            and d["valid_meeting"] and d["meeting_ended"]
+            and not d["transcript_deleted"]]
+
+
+def fetch_transcript(doc_id: str) -> list[dict]:
+    if _use_mcp():
+        return _mcp_fetch_transcript(doc_id)
+    resp = _api("/v1/get-document-transcript", {"document_id": doc_id})
+    return resp if isinstance(resp, list) else []
+
+
+def transcript_to_vtt(segments: list[dict], me_name: str = "Cam Mace") -> bytes:
+    """Convert Granola segments to WebVTT. Speaker mapping:
+      - `detected_speaker_name` when present
+      - `source: microphone`  → me_name
+      - `source: system`      → "Other"
+    Timestamps are HH:MM:SS.mmm relative to the first segment's start_timestamp.
+    """
+    if not segments:
+        return b"WEBVTT\n\n"
+    def _parse(s):
+        return datetime.fromisoformat(s.replace("Z", "+00:00"))
+    t0 = _parse(segments[0]["start_timestamp"])
+    def _fmt(td: timedelta) -> str:
+        total_ms = int(td.total_seconds() * 1000)
+        h, rem = divmod(total_ms, 3_600_000)
+        m, rem = divmod(rem, 60_000)
+        s, ms = divmod(rem, 1000)
+        return f"{h:02d}:{m:02d}:{s:02d}.{ms:03d}"
+    lines = ["WEBVTT", ""]
+    for i, seg in enumerate(segments, 1):
+        try:
+            start = _parse(seg["start_timestamp"])
+            end = _parse(seg["end_timestamp"])
+        except Exception:
+            continue
+        speaker = (seg.get("detected_speaker_name") or "").strip()
+        if not speaker:
+            speaker = me_name if seg.get("source") == "microphone" else "Other"
+        text = (seg.get("text") or "").strip()
+        if not text:
+            continue
+        lines.append(str(i))
+        lines.append(f"{_fmt(start - t0)} --> {_fmt(end - t0)}")
+        lines.append(f"<v {speaker}>{text}</v>")
+        lines.append("")
+    return ("\n".join(lines)).encode()
+
+
+def fetch_transcript_vtt(doc_id: str, me_name: str = "Cam Mace") -> bytes:
+    return transcript_to_vtt(fetch_transcript(doc_id), me_name=me_name)
+
+
+# --- Summary fallback (free-tier) --------------------------------------------
+# Granola gates the raw transcript behind paid tiers (get_meeting_transcript
+# returns "Transcripts are only available to paid Granola tiers" otherwise),
+# but the AI-generated *summary* is returned by get_meetings on any tier. When
+# no transcript is available we fall back to that summary so the downstream
+# meeting pipeline still has substantive content to structure. (Added
+# 2026-06-29 after Granola paywalled transcripts ~2026-06-23.)
+
+def fetch_summary(doc_id: str) -> str:
+    """Return Granola's AI-generated summary markdown for a doc, or '' if
+    unavailable. MCP-only (the summary lives in the <summary> block of the
+    get_meetings response)."""
+    if not _use_mcp():
+        return ""
+    try:
+        res = _mcp_call("tools/call", {
+            "name": "get_meetings",
+            "arguments": {"meeting_ids": [doc_id]},
+        })
+    except Exception:
+        return ""
+    txt = _mcp_tool_text(res)
+    m = re.search(r"<summary>\s*(.*?)\s*</summary>", txt, re.DOTALL)
+    return m.group(1).strip() if m else ""
+
+
+def summary_to_vtt(summary: str, speaker: str = "Granola Notes") -> bytes:
+    """Wrap a markdown summary as WebVTT so the existing meeting pipeline (which
+    parses transcript.vtt) can consume it unchanged. One cue per blank-line-
+    separated paragraph with synthetic 10s timestamps; internal newlines are
+    collapsed to spaces so each paragraph stays a single cue block (the VTT
+    parser splits cues on blank lines)."""
+    paras = [p.strip() for p in re.split(r"\n\s*\n", summary.strip()) if p.strip()]
+    if not paras:
+        return b"WEBVTT\n\n"
+    def _fmt(s: int) -> str:
+        return f"{s // 3600:02d}:{(s % 3600) // 60:02d}:{s % 60:02d}.000"
+    lines = ["WEBVTT", ""]
+    for i, para in enumerate(paras):
+        text = " ".join(l.strip() for l in para.splitlines() if l.strip())
+        start, end = i * 10, i * 10 + 10
+        lines.append(str(i + 1))
+        lines.append(f"{_fmt(start)} --> {_fmt(end)}")
+        lines.append(f"<v {speaker}>{text}</v>")
+        lines.append("")
+    return ("\n".join(lines)).encode()
+
+
+def fetch_best_vtt(doc_id: str, me_name: str = "Cam Mace") -> tuple[bytes, str]:
+    """Best available content for a Granola doc as WebVTT, transcript-first.
+
+    Returns (vtt_bytes, source):
+      - ("…", "granola")          full transcript (paid tier)
+      - ("…", "granola-summary")  AI summary fallback (free tier)
+      - (b"WEBVTT\\n\\n", "")      neither available
+    Callers treat len(vtt) < 32 as "nothing usable"."""
+    vtt = fetch_transcript_vtt(doc_id, me_name=me_name)
+    if len(vtt) >= 32:
+        return vtt, "granola"
+    summ = fetch_summary(doc_id)
+    if summ:
+        return summary_to_vtt(summ), "granola-summary"
+    return b"WEBVTT\n\n", ""
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--list-hours", type=int, default=None,
+                    help="List recent meeting docs within N hours")
+    ap.add_argument("--doc-id", type=str, default=None,
+                    help="Fetch transcript for a specific doc id")
+    ap.add_argument("--as-vtt", action="store_true",
+                    help="With --doc-id, emit WebVTT (else raw segment JSON)")
+    ap.add_argument("--check-auth", action="store_true",
+                    help="Print token expiry status and exit")
+    args = ap.parse_args()
+
+    if args.check_auth:
+        if _use_mcp():
+            print(f"auth mode: MCP via OAuth ({OAUTH_STATE_PATH})")
+            try:
+                docs = _mcp_list_meetings(hours_back=24)
+                print(f"smoke test: list_meetings OK — {len(docs)} doc(s) in last 24h")
+                for d in docs[:3]:
+                    print(f"  - [{d['id'][:8]}…] {d['title']!r} @ {d['start']}")
+            except Exception as e:
+                print(f"smoke test FAILED: {e}")
+                return 1
+            return 0
+        api_key = _api_key_from_env()
+        if api_key:
+            print(f"auth mode: API key (env)  len={len(api_key)}  prefix={api_key[:6]}…")
+            try:
+                resp = _api("/v2/get-documents", payload={"limit": 1, "offset": 0})
+                docs = resp.get("docs", []) if isinstance(resp, dict) else []
+                print(f"smoke test: 200 OK — got {len(docs)} doc(s)")
+            except Exception as e:
+                print(f"smoke test FAILED: {e}")
+                return 1
+            return 0
+        print("auth mode: legacy file (no CLIO_GRANOLA_API_KEY env, no OAuth state)")
+        _, _, tokens = _read_accounts()
+        exp_ms = tokens.get("obtained_at", 0) + tokens.get("expires_in", 0) * 1000
+        remaining = (exp_ms - int(time.time() * 1000)) / 1000 / 60
+        print(f"access_token remaining: {remaining:.1f} min")
+        if remaining < 5:
+            print("  refreshing…")
+            get_access_token()
+            print("  refreshed")
+        return 0
+
+    if args.list_hours is not None:
+        docs = list_recent_meetings(hours_back=args.list_hours)
+        out = []
+        for d in docs:
+            out.append({
+                "id": d["id"],
+                "title": d["title"],
+                "created_at": d["created_at"].isoformat() if d["created_at"] else None,
+                "start": d["start"].isoformat() if d["start"] else None,
+                "end": d["end"].isoformat() if d["end"] else None,
+                "ical_uid": d["ical_uid"],
+                "join_url": d["join_url"],
+                "attendees": d["attendees"],
+            })
+        print(json.dumps(out, indent=2))
+        return 0
+
+    if args.doc_id:
+        if args.as_vtt:
+            sys.stdout.buffer.write(fetch_transcript_vtt(args.doc_id))
+        else:
+            print(json.dumps(fetch_transcript(args.doc_id), indent=2))
+        return 0
+
+    ap.print_help()
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())

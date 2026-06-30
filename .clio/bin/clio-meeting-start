@@ -1,0 +1,73 @@
+#!/usr/bin/env bash
+# Start a 2-track recording (mic + BlackHole system audio) via ffmpeg.
+# Prints the session ID on success; stores PID for clio-meeting-stop.
+set -euo pipefail
+
+: "${CLIO_MEETING_DIR:?CLIO_MEETING_DIR not set — source ~/.clio/env}"
+
+TITLE=""
+ATTENDEES=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --title)     TITLE="$2"; shift 2 ;;
+    --attendees) ATTENDEES="$2"; shift 2 ;;
+    --auto)      shift ;;  # reserved for launchd watcher; no-op for now
+    *) echo "Unknown flag: $1" >&2; exit 1 ;;
+  esac
+done
+
+mkdir -p "$CLIO_MEETING_DIR/sessions"
+PID_FILE="$CLIO_MEETING_DIR/active.pid"
+SESSION_FILE="$CLIO_MEETING_DIR/active.session"
+
+if [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
+  echo "A recording is already active (pid $(cat "$PID_FILE"))." >&2
+  echo "Run: clio-meeting stop" >&2
+  exit 1
+fi
+
+# Discover avfoundation audio device indices dynamically — they vary per Mac.
+DEVICES_OUT="$(ffmpeg -f avfoundation -list_devices true -i "" 2>&1 || true)"
+AUDIO_SECTION="$(printf '%s\n' "$DEVICES_OUT" | awk '/AVFoundation audio devices/{flag=1; next} flag')"
+
+find_idx() {
+  printf '%s\n' "$AUDIO_SECTION" | grep -iE "$1" | head -1 | sed -n 's/.*\[\([0-9][0-9]*\)\].*/\1/p'
+}
+
+MIC_IDX="$(find_idx 'microphone|built-in')"
+BH_IDX="$(find_idx 'blackhole 2ch')"
+
+[ -n "$MIC_IDX" ] || { echo "No microphone device found via avfoundation" >&2; exit 1; }
+[ -n "$BH_IDX" ]  || { echo "BlackHole 2ch not found. Install: brew install --cask blackhole-2ch" >&2; exit 1; }
+
+SESSION_ID="$(date +%Y%m%d-%H%M%S)"
+SESSION_DIR="$CLIO_MEETING_DIR/sessions/$SESSION_ID"
+mkdir -p "$SESSION_DIR"
+
+python3 -c "
+import json, sys
+json.dump({
+    'session_id': '$SESSION_ID',
+    'title': '''$TITLE''',
+    'attendees': '''$ATTENDEES''',
+    'started_at': __import__('datetime').datetime.utcnow().isoformat() + 'Z',
+    'mic_device_idx': '$MIC_IDX',
+    'system_device_idx': '$BH_IDX',
+}, open('$SESSION_DIR/metadata.json', 'w'), indent=2)
+"
+
+# Single ffmpeg process with two inputs keeps the tracks tightly synced.
+# -t 14400 = 4-hour safety cap.
+ffmpeg -nostdin -loglevel error \
+  -f avfoundation -i ":${MIC_IDX}" \
+  -f avfoundation -i ":${BH_IDX}" \
+  -map 0:a -c:a pcm_s16le -ar 16000 -ac 1 "$SESSION_DIR/mic.wav" \
+  -map 1:a -c:a pcm_s16le -ar 16000 -ac 1 "$SESSION_DIR/system.wav" \
+  -t 14400 \
+  > "$SESSION_DIR/ffmpeg.log" 2>&1 &
+
+PID=$!
+echo "$PID" > "$PID_FILE"
+echo "$SESSION_ID" > "$SESSION_FILE"
+
+echo "Recording session $SESSION_ID (pid $PID, mic=$MIC_IDX, system=$BH_IDX)"

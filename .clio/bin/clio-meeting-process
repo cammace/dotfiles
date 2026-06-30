@@ -1,0 +1,1001 @@
+#!/usr/bin/env python3
+"""
+Transcribe a recorded session with whisperx, summarize with Claude via the
+`claude -p` CLI (subscription billing, not API), and write a Meeting note
+into the Obsidian vault.
+
+Usage:
+  clio-meeting-process <session-id>
+  clio-meeting-process /path/to/session-dir
+
+Auth note: we deliberately unset ANTHROPIC_API_KEY when spawning `claude`
+so it uses the OAuth subscription token (Pro/Team) instead of burning API
+credits. Per ~/.claude/.../memory/feedback_scrub_anthropic_api_key_subprocess.md.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+MEETING_DIR = Path(os.environ.get("CLIO_MEETING_DIR", Path.home() / ".clio" / "meetings"))
+VAULT = Path(os.environ.get("CLIO_MEETING_VAULT", Path.home() / "Documents" / "Clio.nosync"))
+WHISPERX_MODEL = os.environ.get("CLIO_MEETING_WHISPERX_MODEL", "large-v3")
+HF_TOKEN = os.environ.get("CLIO_MEETING_HF_TOKEN", "")
+CLAUDE_MODEL = os.environ.get("CLIO_MEETING_CLAUDE_MODEL", "claude-sonnet-4-6")
+
+
+def resolve_session(arg: str) -> Path:
+    p = Path(arg)
+    if p.is_dir():
+        return p
+    guess = MEETING_DIR / "sessions" / arg
+    if guess.is_dir():
+        return guess
+    # Also check archive in case we're reprocessing
+    archived = MEETING_DIR / "archive" / arg
+    if archived.is_dir():
+        return archived
+    sys.exit(f"Session not found: {arg}")
+
+
+def run_whisperx(audio: Path, out_dir: Path, diarize: bool) -> Path | None:
+    """Transcribe a single track. Returns the JSON output path, or None if silent.
+
+    Skips whisperx if a prior run already produced the JSON output — enables cheap
+    re-processing when downstream stages (Claude/obsidian) fail and need a retry.
+    """
+    if audio.stat().st_size < 10_000:
+        return None
+
+    json_path = out_dir / (audio.stem + ".json")
+    if json_path.exists() and json_path.stat().st_size > 0:
+        print(f"  (cached: {json_path.name})", flush=True)
+        return json_path
+
+    cmd = [
+        "whisperx", str(audio),
+        "--model", WHISPERX_MODEL,
+        "--output_dir", str(out_dir),
+        "--output_format", "json",
+        "--compute_type", "int8",
+        "--language", "en",
+    ]
+    if diarize:
+        # Pin to pyannote/speaker-diarization-3.1 — whisperx 3.8.5 defaults to
+        # pyannote/speaker-diarization-community-1 which is a newer gated repo
+        # with its own access list. Sticking with 3.1 matches the README setup.
+        cmd += ["--diarize", "--diarize_model", "pyannote/speaker-diarization-3.1"]
+        if HF_TOKEN:
+            cmd += ["--hf_token", HF_TOKEN]
+
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        print(f"[warn] whisperx failed on {audio.name}:\n{result.stderr}", file=sys.stderr)
+        return None
+
+    return json_path if json_path.exists() else None
+
+
+def parse_vtt(vtt_path: Path) -> list[dict]:
+    """Parse a WebVTT transcript (e.g., Teams export) into the same segment
+    shape load_segments produces. Handles the <v Speaker>text</v> voice tag."""
+    text = vtt_path.read_text()
+    out: list[dict] = []
+    for block in re.split(r"\r?\n\r?\n", text.strip()):
+        lines = [l.strip() for l in block.splitlines() if l.strip()]
+        if not lines or lines[0].startswith("WEBVTT"):
+            continue
+        timing_idx = next((i for i, l in enumerate(lines) if "-->" in l), None)
+        if timing_idx is None:
+            continue
+        m = re.match(
+            r"(\d+):(\d+):(\d+)[.,]\d+\s*-->\s*(\d+):(\d+):(\d+)[.,]\d+",
+            lines[timing_idx],
+        )
+        if not m:
+            continue
+        h1, mi1, s1, h2, mi2, s2 = (int(x) for x in m.groups())
+        start = h1 * 3600 + mi1 * 60 + s1
+        end = h2 * 3600 + mi2 * 60 + s2
+        raw = " ".join(lines[timing_idx + 1:]).strip()
+        if not raw:
+            continue
+        vm = re.match(r"<v\s+([^>]+)>(.*?)(?:</v>)?\s*$", raw, re.DOTALL)
+        speaker = vm.group(1).strip() if vm else "Unknown"
+        content = (vm.group(2) if vm else raw).strip()
+        if not content:
+            continue
+        out.append({"start": float(start), "end": float(end), "speaker": speaker, "text": content})
+    return out
+
+
+def load_segments(json_path: Path | None, default_speaker: str) -> list[dict]:
+    if not json_path or not json_path.exists():
+        return []
+    try:
+        data = json.loads(json_path.read_text())
+    except Exception:
+        return []
+    out = []
+    for seg in data.get("segments", []):
+        text = (seg.get("text") or "").strip()
+        if not text:
+            continue
+        out.append({
+            "start": float(seg.get("start", 0.0)),
+            "end": float(seg.get("end", 0.0)),
+            "speaker": seg.get("speaker") or default_speaker,
+            "text": text,
+        })
+    return out
+
+
+def format_transcript(segments: list[dict]) -> str:
+    lines = []
+    for s in segments:
+        mm, ss = divmod(int(s["start"]), 60)
+        lines.append(f"[{mm:02d}:{ss:02d}] {s['speaker']}: {s['text']}")
+    return "\n".join(lines)
+
+
+def list_people(vault: Path) -> list[str]:
+    people_dir = vault / "People"
+    if not people_dir.exists():
+        return []
+    return sorted(p.stem for p in people_dir.glob("*.md") if p.stem.lower() != "index")
+
+
+def list_active_projects(vault: Path) -> list[str]:
+    """Return kebab-case slugs of Projects/<slug>/ dirs whose root note is status: active.
+    Used so Claude can wikilink canonical project names in the summary."""
+    projects_dir = vault / "Projects"
+    if not projects_dir.exists():
+        return []
+    out: list[str] = []
+    for d in sorted(projects_dir.iterdir()):
+        if not d.is_dir():
+            continue
+        root = d / f"{d.name}.md"
+        if not root.exists():
+            root = next(d.glob("*.md"), None)
+        if not root or not root.exists():
+            continue
+        try:
+            head = root.read_text().split("\n---", 2)
+        except Exception:
+            continue
+        if len(head) < 2:
+            continue
+        frontmatter = head[0].lstrip("-\n") + head[1]
+        if re.search(r"^\s*status:\s*active\s*$", frontmatter, re.MULTILINE):
+            out.append(d.name)
+    return out
+
+
+def load_glossary(vault: Path) -> str:
+    """Return the CHA glossary content if present — fed to Claude so meeting
+    notes use canonical client/project/person names instead of transcription variants
+    ('Monster' → 'Muenster Memorial / MMH', 'Marie' → 'Murray')."""
+    p = vault / "Resources" / "CHA Glossary.md"
+    if not p.exists():
+        return ""
+    try:
+        return p.read_text()
+    except Exception:
+        return ""
+
+
+def prep_note_synthesis_override(meta: dict) -> str | None:
+    """Check a matching prep note's frontmatter for a `synthesis:` override.
+
+    A prep note is Meetings/<date>-<slug>.md with `post-meeting-merge: true`
+    (same discovery rule as the slug-merge pass in main()). Add
+    `synthesis: sonnet|haiku|template|skip` (alias `full` = sonnet) to its
+    frontmatter to force that processing path for this meeting.
+    """
+    started = meta.get("started_at", "")
+    if len(started) < 10:
+        return None
+    date_str = started[:10]
+    title_tokens = set(re.findall(r"[a-z0-9]+", (meta.get("title") or "").lower()))
+    if not title_tokens:
+        return None
+    for c in (VAULT / "Meetings").glob(f"{date_str}-*.md"):
+        try:
+            head = c.read_text(errors="ignore")[:1000]
+        except Exception:
+            continue
+        if not re.search(r"^post-meeting-merge:\s*true\s*$", head, re.MULTILINE):
+            continue
+        m = re.search(r"^synthesis:\s*(full|sonnet|haiku|template|skip)\s*$", head, re.MULTILINE)
+        if not m:
+            continue
+        prep_tokens = set(re.findall(r"[a-z0-9]+", c.stem[len(date_str) + 1:]))
+        if len(title_tokens & prep_tokens) >= 2:
+            val = m.group(1)
+            return "sonnet" if val == "full" else val
+    return None
+
+
+def classify_meeting(meta: dict, merged: list) -> str:
+    """Decide processing path: skip | template | haiku | sonnet.
+
+    skip      — duration < 5 min; no Meeting note produced
+    template  — deterministic note from VTT (short recurring standups only —
+                "standup" in title AND duration < 20 min; substantive standups
+                get full synthesis. Fixes the 2026-05-14 standup→template trap
+                where ANY standup title produced an empty Claude synthesis.)
+    haiku     — small/low-stakes synthesis (claude-haiku-4-5)
+    sonnet    — full synthesis (CLIO_MEETING_CLAUDE_MODEL, default sonnet-4-6)
+
+    Overrides (highest wins): CLIO_MEETING_CLASSIFIER_OVERRIDE env var, then a
+    matching prep note's `synthesis:` frontmatter (see prep_note_synthesis_override).
+    """
+    override = os.environ.get("CLIO_MEETING_CLASSIFIER_OVERRIDE", "").strip()
+    if override in ("skip", "template", "haiku", "sonnet"):
+        return override
+
+    prep = prep_note_synthesis_override(meta)
+    if prep:
+        return prep
+
+    duration_sec = (merged[-1]["end"] - merged[0]["start"]) if merged else 0
+    if duration_sec < 300:
+        return "skip"
+
+    title = (meta.get("title") or "").lower()
+    if ("standup" in title or "stand up" in title) and duration_sec < 1200:
+        return "template"
+
+    return "sonnet"
+
+
+_AI_SPEAKER_VERB = re.compile(
+    r"\b(?:i(?:'ll| will| can| need to| should| have to)|let me|i'm gonna|i am going to)\s+([a-z][^.?!]{6,140})",
+    re.IGNORECASE,
+)
+# Imperative phrase is required — without it the match is just discourse ("Yeah, that...").
+_AI_NAME_DIRECT = re.compile(
+    r"(?:^|[.!?]\s+)([A-Z][a-z]+),\s+(?:can you|could you|please|you should|you need to|you'll need to)\s+([a-z][^.?!]{6,140})",
+)
+_AI_NAME_WILL = re.compile(
+    r"\b([A-Z][a-z]+)\s+(?:will|is going to|is gonna|needs to|should)\s+([a-z][^.?!]{6,140})",
+)
+_AI_EXPLICIT = re.compile(
+    r"\b(?:TODO|action item|follow[-\s]?up|next step)s?\b\s*[:\-]?\s*(.+?)(?:[.?!]|$)",
+    re.IGNORECASE,
+)
+
+# Single-word capitalized "names" that are actually discourse markers / fillers.
+# Drops false positives where speech transcription capitalizes a sentence-initial
+# affirmation or hedge as if it were a proper name.
+_AI_NAME_STOPWORDS = {
+    "yeah", "yes", "no", "nope", "yep", "okay", "ok", "well", "so", "and",
+    "but", "or", "if", "when", "while", "then", "uh", "um", "hmm", "oh",
+    "ah", "ooh", "right", "actually", "exactly", "hey", "cool", "like",
+    "we", "they", "he", "she", "it", "this", "that", "these", "those",
+    "one", "two", "three", "try", "got",
+}
+# Pronouns "i", "me", "us", "you" intentionally NOT in stopwords — speaker_who
+# legitimately uses "Me" for Cam-attributed action items.
+
+
+def extract_action_items_heuristic(segments: list[dict]) -> list[dict]:
+    """Deterministic regex pass over segments. Returns Claude-shaped items
+    ({who, what, due}). Used by the template path so recurring standups
+    still produce a useful action-item list without a Claude call."""
+    items: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+    cam_aliases = {"cam mace", "cam", "me"}
+
+    def add(who: str, what: str) -> None:
+        if who.lower() in _AI_NAME_STOPWORDS:
+            return
+        what = what.strip().rstrip(",;:.")
+        if len(what) < 8:
+            return
+        key = (who.lower(), what.lower()[:80])
+        if key in seen:
+            return
+        seen.add(key)
+        items.append({"who": who, "what": what, "due": None})
+
+    for seg in segments:
+        speaker = (seg.get("speaker") or "Unknown").strip()
+        text = (seg.get("text") or "").strip()
+        if len(text.split()) < 6:
+            continue
+        speaker_who = "Me" if speaker.lower() in cam_aliases else speaker
+
+        for m in _AI_SPEAKER_VERB.finditer(text):
+            add(speaker_who, m.group(1))
+        for m in _AI_EXPLICIT.finditer(text):
+            add(speaker_who, m.group(1))
+        for m in _AI_NAME_DIRECT.finditer(text):
+            add(m.group(1), m.group(2))
+        for m in _AI_NAME_WILL.finditer(text):
+            add(m.group(1), m.group(2))
+
+    return items
+
+
+def make_template_result(meta: dict, segments: list[dict]) -> dict:
+    """Produce a Claude-shaped result dict deterministically — for recurring
+    standups where the synthesis cost outweighs the value. Action items come
+    from the regex extractor; summary/decisions stay empty by design."""
+    title = meta.get("title") or "Untitled"
+    attendees = [a.strip() for a in (meta.get("attendees") or "").split(",") if a.strip()]
+    return {
+        "slug": slugify(title),
+        "title": title,
+        "meeting_type": "standup",
+        "attendees": attendees,
+        "summary": "",
+        "key_points": [],
+        "decisions": [],
+        "action_items": extract_action_items_heuristic(segments),
+        "open_questions": [],
+        "tags": ["standup"],
+    }
+
+
+def archive_session(session_dir: Path) -> None:
+    """Move the live session dir under archive/ — same destination clio-meeting-process
+    has used since day one. Idempotent."""
+    archive_root = MEETING_DIR / "archive"
+    archive_root.mkdir(exist_ok=True)
+    dest = archive_root / session_dir.name
+    if dest.exists():
+        shutil.rmtree(dest)
+    shutil.move(str(session_dir), str(dest))
+
+
+CLAUDE_SYSTEM = """You summarize meeting transcripts into structured notes for an Obsidian vault.
+
+Output EXACTLY this JSON structure — no extra fields, no prose, no markdown fences:
+{
+  "slug": "short-kebab-case-topic",
+  "title": "Human-readable title",
+  "meeting_type": "standup|huddle|1-on-1|review|planning|call|client|memo|other",
+  "attendees": ["Full Name", ...],
+  "projects": ["project-slug", ...],
+  "summary": "3-5 sentence executive summary",
+  "key_points": ["bullet", ...],
+  "decisions": ["decision", ...],
+  "action_items": [{"who":"Name or Me","what":"task","due":"YYYY-MM-DD or null"}],
+  "open_questions": ["question", ...],
+  "tags": ["topic/thing", ...]
+}
+
+Rules:
+- meeting_type: one of the enum values above. "1-on-1" is for two-person calls (Cam + one other); "huddle" is a recurring small-group sync; "standup" is a recurring team status update; "client" is a meeting with an external client; "call" is a one-off non-recurring discussion; "memo" is a solo recording; "other" only when nothing else fits.
+- attendees: match "known vault people" names exactly when they appear in the transcript; otherwise best-guess the name as it appears. Use "Cam Mace" for "me"/Cam/"I".
+- If the transcript has no distinct other speakers, set meeting_type="memo" and attendees=["Cam Mace"].
+- projects: kebab-case slugs from the active-projects list that this meeting materially advances or references. Empty array if none clearly involved. Do NOT invent slugs that aren't in the active-projects list.
+- tags: 2-4 prefixed topical tags — use "topic/<thing>" form (e.g., "topic/grants", "topic/budget", "topic/sso"). Do NOT use bare topics, project slugs, meeting types, or people names as tags — those have their own dedicated fields.
+- action_items: use "Me" for Cam's own todos; names for others. due may be null.
+- Never invent information not present in the transcript.
+
+Canonical naming — use the CHA Glossary when provided:
+- Normalize client/project/person names to their canonical form from the glossary. Transcription-variant names like "Monster" or "Munster" → "Muenster Memorial (MMH)"; "Marie" → "Murray" (Murray-Calloway County Hospital); "Janus" → "Janice Macdonald"; etc. Apply across summary, key_points, decisions, action_items.what, open_questions.
+- Prefer "Name (ACRONYM)" form on first mention when the glossary gives both; bare acronym or bare name is fine thereafter.
+
+Wikilinks — surface connections to existing vault notes:
+- In summary, key_points, decisions, action_items.what, and open_questions, wrap any known entity in double-bracket wikilinks: [[Person Name]], [[Projects/<slug>]], [[Resources/<note>]].
+- Only link to entities that appear in the provided "Known vault people" list, "Active projects" list, or the Glossary's People / Clients / Project Codenames sections. Do not invent wikilinks to notes that may not exist.
+- Use the glossary's exact spelling as the link target. Example: "Mike" in transcript → [[Michael Lucey]] in output.
+- Project slugs use kebab-case from the active-projects list: [[Projects/hhs-onboarding]], not [[HHS]].
+- attendees array stays as plain names (not bracketed) — the renderer wraps those.
+
+Emit ONLY the JSON object above — no prefatory text, no trailing commentary."""
+
+
+def call_claude(transcript: str, metadata: dict, people_names: list[str],
+                active_projects: list[str], glossary: str, model: str | None = None) -> dict:
+    """Shell out to `claude -p` with subscription auth. Constrain output shape
+    via the system prompt; --json-schema has a bug that silently returns empty
+    output on large prompts so we skip it and parse JSON from stdout.
+
+    `model` overrides claude's default selection — used by classifier-driven tiered
+    routing (haiku for low-stakes, sonnet for substantive)."""
+    people_block = ", ".join(people_names[:300]) if people_names else "(none listed)"
+    projects_block = ", ".join(active_projects) if active_projects else "(none listed)"
+    glossary_block = glossary.strip() if glossary.strip() else "(no glossary available)"
+
+    user_msg = (
+        f"Known vault people (use exact spelling when matched):\n{people_block}\n\n"
+        f"Active projects (slugs — wikilink as [[Projects/<slug>]]):\n{projects_block}\n\n"
+        f"CHA Glossary (source of truth for canonical names):\n{glossary_block}\n\n"
+        f"Meeting metadata:\n{json.dumps(metadata, indent=2)}\n\n"
+        f"Transcript (speaker 'me' = Cam; other speakers may be diarized labels like SPEAKER_00):\n"
+        f"{transcript}\n\n"
+        f"Produce the structured summary now. Output ONLY the JSON object."
+    )
+
+    env = os.environ.copy()
+    env.pop("ANTHROPIC_API_KEY", None)
+
+    cmd = ["claude", "--print", "--append-system-prompt", CLAUDE_SYSTEM]
+    if model:
+        cmd.extend(["--model", model])
+
+    result = subprocess.run(
+        cmd, input=user_msg, capture_output=True, text=True, env=env, timeout=300
+    )
+    if result.returncode != 0 or not result.stdout.strip():
+        sys.exit(
+            f"claude -p failed (code {result.returncode}):\n"
+            f"stderr: {result.stderr}\n"
+            f"stdout: {result.stdout!r}\n"
+            f"prompt size: {len(user_msg)} chars"
+        )
+
+    text = result.stdout.strip()
+    # --json-schema constrains output; strip any stray fences just in case.
+    text = re.sub(r"^```(?:json)?\s*", "", text)
+    text = re.sub(r"\s*```$", "", text)
+
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        m = re.search(r"\{.*\}", text, re.DOTALL)
+        if not m:
+            sys.exit(f"Claude output not JSON:\n{text}")
+        return json.loads(m.group(0))
+
+
+def render_body(result: dict, transcript_embed_link: str | None) -> str:
+    attendees = result.get("attendees") or []
+    attendees_line = (
+        "**Attendees:** " + ", ".join(f"[[{a}]]" for a in attendees)
+        if attendees else "**Attendees:**"
+    )
+    lines = [f"# {result.get('title', 'Untitled Meeting')}", "", attendees_line, "", "## Summary", ""]
+    if result.get("summary"):
+        lines.append(result["summary"].strip())
+    lines += ["", "## Key Discussion Points", ""]
+    for k in result.get("key_points") or []:
+        lines.append(f"- {k}")
+    lines += ["", "## Decisions", ""]
+    for d in result.get("decisions") or []:
+        lines.append(f"- {d}")
+    # Display-only — the actionable copies live in Inbox.md (queued for triage)
+    # and downstream in Todoist/GitHub. Plain bullets so this doesn't look
+    # like a half-actionable checklist next to the real one.
+    lines += ["", "## Action Items", "", "_Queued in [[Inbox.md]] — triage there._", ""]
+    for a in result.get("action_items") or []:
+        who = a.get("who") or "?"
+        what = a.get("what") or ""
+        due = f" (due {a['due']})" if a.get("due") else ""
+        lines.append(f"- **{who}:** {what}{due}")
+    if result.get("open_questions"):
+        lines += ["", "## Open Questions", ""]
+        for q in result["open_questions"]:
+            lines.append(f"- {q}")
+    # Transcript embedded from a sibling note in Attachments/transcripts/ so the
+    # meeting note itself stays small. Falls back to inline if no link given.
+    if transcript_embed_link:
+        lines += ["", "## Transcript", "", f"![[{transcript_embed_link}]]", ""]
+    return "\n".join(lines)
+
+
+def render_transcript_attachment(transcript: str) -> str:
+    """Render the transcript-attachment note body — a single collapsed callout
+    that Obsidian embeds via ![[…]] from the meeting note."""
+    lines = ["> [!quote]- Full transcript"]
+    for tline in transcript.splitlines():
+        lines.append(f"> {tline}" if tline else ">")
+    lines.append("")
+    return "\n".join(lines)
+
+
+# Direct filesystem writes — the bundled Obsidian.app CLI uses Chromium's
+# process_singleton to hand off commands to a running instance. When the
+# running instance is busy (sync, indexing the 24-plugin vault), the
+# singleton write fails with "Broken pipe" and the CLI hangs ~20 min before
+# falling back to its own Electron — by then queued argv from later commands
+# has clobbered the original. Direct write is instant; the vault watcher
+# picks up the new file automatically.
+def render_frontmatter(fm: dict) -> str:
+    lines = []
+    for k, v in fm.items():
+        if isinstance(v, list):
+            lines.append(f"{k}:")
+            for item in v:
+                lines.append(f"  - {item}")
+        else:
+            lines.append(f"{k}: {v}")
+    return "\n".join(lines) + "\n"
+
+
+def write_meeting_note(vault_path: str, frontmatter: dict, body: str) -> str:
+    """Write a meeting note. Honors `post-meeting-merge: true` on an existing
+    note by merging the new body under '## Discussion' and preserving the prep
+    agenda above. Returns 'created', 'merged', or 'overwrote'."""
+    target = VAULT / vault_path
+    target.parent.mkdir(parents=True, exist_ok=True)
+
+    if target.exists():
+        existing = target.read_text()
+        if re.search(r"^post-meeting-merge:\s*true\s*$", existing, re.MULTILINE):
+            disc = existing.find("\n## Discussion")
+            if disc != -1:
+                # Flip the flag to false so reruns (e.g., the auto-router) don't
+                # re-append the same body. Keep the key for traceability.
+                preserved_raw = existing[:disc]
+                preserved_raw = re.sub(
+                    r"^post-meeting-merge:\s*true\s*$",
+                    "post-meeting-merge: false",
+                    preserved_raw,
+                    count=1,
+                    flags=re.MULTILINE,
+                )
+                preserved = preserved_raw.rstrip() + "\n\n## Discussion\n\n"
+                # Strip the body's H1 + Attendees block — they're already in the prep header.
+                m = re.search(r"^## Summary", body, re.MULTILINE)
+                merged_body = body[m.start():] if m else body
+                target.write_text(preserved + merged_body)
+                return "merged"
+
+    full = "---\n" + render_frontmatter(frontmatter) + "---\n\n" + body
+    status = "overwrote" if target.exists() else "created"
+    target.write_text(full)
+    return status
+
+
+def append_to_inbox(content: str) -> None:
+    inbox = VAULT / "Inbox.md"
+    with open(inbox, "a") as f:
+        f.write(content)
+
+
+_DEDUP_STOPWORDS = {
+    "the","a","an","and","or","but","of","to","in","for","on","at","by","with","from",
+    "is","are","was","were","be","been","being","has","have","had","do","does","did",
+    "me","cam","check","add","note","work","reach","ask","scope","email","attend",
+    "this","that","these","those","it","its","if","when","will","would","should",
+    "out","up","into","via","about","as","so","can","could","may","might","need","needs",
+    "due","today","tomorrow","next","week","yeah","okay","get","got","make","made","see",
+    "thing","things","stuff","good","also","still","just","really","more","other","well",
+    # Generic action verbs common across action items — keep signal in names/nouns only
+    "review","update","decide","send","confirm","finish","figure","start","begin",
+    "set","run","look","find","use","plan","pick","try","call","loop","meet",
+    "become","becomes","source","truth","back","back-up",
+    # Generic time/filler words that don't carry topic signal
+    "once","while","before","after","until","then","now","soon","later",
+}
+
+
+def _content_tokens(text: str) -> list[str]:
+    tokens = re.findall(r"[A-Za-z][A-Za-z0-9_-]{2,}", (text or "").lower())
+    return [t for t in tokens if t not in _DEDUP_STOPWORDS]
+
+
+def append_action_items_to_inbox(meeting_vault_path: str, action_items: list[dict]) -> int:
+    """Append meeting action items to Inbox.md so /triage-inbox can route them.
+    Returns the number of items appended. Owner 'Me' renders as a plain checkbox;
+    other owners get a bold name prefix so Cam can see who he's waiting on.
+    For Cam's own items, runs batched GitHub + Todoist + vault-grep dup searches
+    (one subprocess per backend per meeting, not per item) and annotates
+    possible matches so /triage-inbox can surface them as options."""
+    items = [a for a in (action_items or []) if (a.get("what") or "").strip()]
+    if not items:
+        return 0
+    from datetime import datetime
+    stamp = datetime.now().strftime("%Y-%m-%d %-I:%M %p")
+    link_target = meeting_vault_path[:-3] if meeting_vault_path.endswith(".md") else meeting_vault_path
+
+    # Single-pass dup-search across all Cam-owned items
+    cam_items = _items_for_cam(items)
+    gh_hits = find_github_dups_batch(cam_items)
+    td_hits = find_todoist_dups_batch(cam_items)
+    vt_hits = find_vault_dups_batch(cam_items, exclude_vault_path=meeting_vault_path)
+
+    lines = ["", f"### {stamp} — Action items from [[{link_target}]]", ""]
+    for idx, a in enumerate(items):
+        who = (a.get("who") or "").strip()
+        what = (a.get("what") or "").strip()
+        due = f" (due {a['due']})" if a.get("due") else ""
+        owner_is_cam = who.lower() in ("", "me", "cam", "cam mace")
+        if owner_is_cam:
+            lines.append(f"- [ ] {what}{due}")
+        else:
+            lines.append(f"- [ ] **{who}:** {what}{due}")
+        if owner_is_cam:
+            for dup in gh_hits.get(idx, []):
+                lines.append(f"    ↳ possibly: {dup}")
+            for dup in td_hits.get(idx, []):
+                lines.append(f"    ↳ possibly: {dup}")
+            for dup in vt_hits.get(idx, []):
+                lines.append(f"    ↳ possibly: {dup}")
+    lines += ["", "---", ""]
+    append_to_inbox("\n".join(lines))
+    return len(items)
+
+
+def slugify(s: str) -> str:
+    s = (s or "").lower()
+    s = re.sub(r"[^a-z0-9]+", "-", s).strip("-")
+    return s or "untitled"
+
+
+# --- Series linkage --------------------------------------------------------
+
+def find_previous_meeting(date_str: str, slug: str) -> str | None:
+    """Find the most recent prior meeting note with the same slug. Returns
+    the filename stem (e.g. "2026-05-08-viewer-standup") or None."""
+    candidates = []
+    for m in (VAULT / "Meetings").glob(f"*-{slug}.md"):
+        prefix = m.stem[:10]
+        if re.match(r"^\d{4}-\d{2}-\d{2}$", prefix) and prefix < date_str:
+            candidates.append((prefix, m.stem))
+    if not candidates:
+        return None
+    return max(candidates)[1]
+
+
+def set_frontmatter_field(path: Path, key: str, value: str) -> bool:
+    """Insert or update a single frontmatter field on an existing note.
+    Returns True on success, False if frontmatter not found."""
+    if not path.exists():
+        return False
+    text = path.read_text()
+    m = re.match(r"^---\n(.*?)\n---\n", text, re.DOTALL)
+    if not m:
+        return False
+    fm_text, body = m.group(1), text[m.end():]
+    fm_lines = fm_text.split("\n")
+    for i, line in enumerate(fm_lines):
+        if re.match(rf"^{re.escape(key)}\s*:", line):
+            fm_lines[i] = f"{key}: {value}"
+            path.write_text("---\n" + "\n".join(fm_lines) + "\n---\n" + body)
+            return True
+    fm_lines.append(f"{key}: {value}")
+    path.write_text("---\n" + "\n".join(fm_lines) + "\n---\n" + body)
+    return True
+
+
+# --- Open Questions tracker -----------------------------------------------
+
+def append_open_questions(meeting_vault_path: str, questions: list[str],
+                          date_str: str) -> int:
+    """Append meeting open questions to vault-root Open Questions.md so they
+    don't get buried per-meeting. Returns count appended."""
+    questions = [q.strip() for q in (questions or []) if q.strip()]
+    if not questions:
+        return 0
+    oq_path = VAULT / "Open Questions.md"
+    link = meeting_vault_path[:-3] if meeting_vault_path.endswith(".md") else meeting_vault_path
+    section = [f"\n### {date_str} — From [[{link}]]", ""]
+    for q in questions:
+        section.append(f"- [ ] {q}")
+    section.append("")
+    chunk = "\n".join(section)
+    if oq_path.exists():
+        oq_path.write_text(oq_path.read_text().rstrip() + "\n" + chunk)
+    else:
+        header = ("---\ntype: tracker\n---\n\n"
+                  "# Open Questions\n\n"
+                  "Unanswered questions surfaced in meetings. Check off when resolved; "
+                  "drag down to an archive section quarterly.\n")
+        oq_path.write_text(header + chunk)
+    return len(questions)
+
+
+# --- Batch dup-search ------------------------------------------------------
+# Replaces the per-item subprocess flood. One shelling per backend per
+# meeting, then client-side per-item token matching.
+
+def _items_for_cam(action_items: list[dict]) -> list[tuple[int, dict, list[str]]]:
+    """Filter to Cam-owned action items with usable keywords. Returns
+    (original_index, item_dict, keywords) tuples."""
+    out = []
+    for idx, a in enumerate(action_items or []):
+        who = (a.get("who") or "").strip().lower()
+        if who not in ("", "me", "cam", "cam mace"):
+            continue
+        kws = _content_tokens((a.get("what") or "").strip())
+        if len(kws) >= 2:
+            out.append((idx, a, kws))
+    return out
+
+
+def find_github_dups_batch(cam_items: list[tuple[int, dict, list[str]]]) -> dict[int, list[str]]:
+    if not cam_items:
+        return {}
+    # Union of every item's top-5 keywords as a single query
+    union = set()
+    for _, _, kws in cam_items:
+        union.update(kws[:5])
+    query = " ".join(sorted(union)[:15])  # cap query size
+    try:
+        result = subprocess.run(
+            ["gh", "search", "issues", "--owner", "commhospital",
+             "--state", "all", "--limit", "30",
+             "--json", "number,title,state,repository",
+             query],
+            capture_output=True, text=True, timeout=20,
+        )
+    except Exception:
+        return {}
+    if result.returncode != 0 or not result.stdout.strip():
+        return {}
+    try:
+        issues = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        return {}
+    per_item: dict[int, list[str]] = {}
+    for idx, _, kws in cam_items:
+        item_tokens = set(kws)
+        hits = []
+        for i in issues:
+            title = i.get("title", "") or ""
+            overlap = item_tokens & set(_content_tokens(title))
+            if len(overlap) < 2:
+                continue
+            repo = (i.get("repository") or {}).get("name", "")
+            number = i.get("number")
+            state = (i.get("state") or "").lower()
+            if repo and number:
+                hits.append(f"[{repo}#{number}](https://github.com/commhospital/{repo}/issues/{number}) “{title}” ({state})")
+            if len(hits) >= 2:
+                break
+        if hits:
+            per_item[idx] = hits
+    return per_item
+
+
+def find_todoist_dups_batch(cam_items: list[tuple[int, dict, list[str]]]) -> dict[int, list[str]]:
+    if not cam_items:
+        return {}
+    union = set()
+    for _, _, kws in cam_items:
+        union.update(kws[:5])
+    query = " | ".join(f"search: {k}" for k in sorted(union)[:15])
+    try:
+        result = subprocess.run(
+            ["td", "task", "list", "--filter", query,
+             "--json", "--limit", "50"],
+            capture_output=True, text=True, timeout=20,
+        )
+    except Exception:
+        return {}
+    if result.returncode != 0 or not result.stdout.strip():
+        return {}
+    try:
+        payload = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        return {}
+    tasks = payload.get("results") if isinstance(payload, dict) else payload
+    if not isinstance(tasks, list):
+        return {}
+    per_item: dict[int, list[str]] = {}
+    for idx, _, kws in cam_items:
+        item_tokens = set(kws)
+        hits = []
+        for t in tasks:
+            content = (t.get("content") or "").strip()
+            if not content:
+                continue
+            overlap = item_tokens & set(_content_tokens(content))
+            if len(overlap) < 2:
+                continue
+            url = (t.get("url") or "").strip()
+            due_obj = t.get("due") or {}
+            due_date = (due_obj.get("date") or "")[:10] if isinstance(due_obj, dict) else ""
+            due_str = f", due {due_date}" if due_date else ""
+            if url:
+                hits.append(f"[Todoist]({url}) “{content}” (active{due_str})")
+            if len(hits) >= 2:
+                break
+        if hits:
+            per_item[idx] = hits
+    return per_item
+
+
+def find_vault_dups_batch(cam_items: list[tuple[int, dict, list[str]]],
+                          exclude_vault_path: str = "") -> dict[int, list[str]]:
+    if not cam_items:
+        return {}
+    roots = [VAULT / "Projects", VAULT / "Meetings"]
+    roots = [str(r) for r in roots if r.is_dir()]
+    if not roots:
+        return {}
+    try:
+        result = subprocess.run(
+            ["grep", "-rnH", "--include=*.md", "-E", r"^- \[ \] .+", *roots],
+            capture_output=True, text=True, timeout=20,
+        )
+    except Exception:
+        return {}
+    if result.returncode not in (0, 1):
+        return {}
+    exclude_abs = str((VAULT / exclude_vault_path).resolve()) if exclude_vault_path else ""
+    # Parse all `- [ ]` candidates once
+    candidates: list[tuple[str, set[str], str]] = []  # (rel_no_ext, token_set, display)
+    for raw in result.stdout.splitlines():
+        parts = raw.split(":", 2)
+        if len(parts) < 3:
+            continue
+        path_str, _line, rest = parts
+        if exclude_abs and str(Path(path_str).resolve()) == exclude_abs:
+            continue
+        content = rest[6:].strip() if rest.startswith("- [ ] ") else rest.strip()
+        if not content:
+            continue
+        try:
+            rel = Path(path_str).resolve().relative_to(VAULT.resolve())
+        except ValueError:
+            continue
+        rel_no_ext = str(rel)[:-3] if str(rel).endswith(".md") else str(rel)
+        candidates.append((rel_no_ext, set(_content_tokens(content)), content))
+    per_item: dict[int, list[str]] = {}
+    for idx, _, kws in cam_items:
+        item_tokens = set(kws)
+        hits = []
+        seen_paths: set[str] = set()
+        for rel_no_ext, ctokens, content in candidates:
+            if rel_no_ext in seen_paths:
+                continue
+            if len(item_tokens & ctokens) < 2:
+                continue
+            seen_paths.add(rel_no_ext)
+            display = content if len(content) <= 80 else content[:77] + "..."
+            hits.append(f"[[{rel_no_ext}]] “{display}”")
+            if len(hits) >= 2:
+                break
+        if hits:
+            per_item[idx] = hits
+    return per_item
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("session")
+    args = ap.parse_args()
+
+    session_dir = resolve_session(args.session)
+    meta_path = session_dir / "metadata.json"
+    meta = json.loads(meta_path.read_text()) if meta_path.exists() else {}
+    mic = session_dir / "mic.wav"
+    sys_aud = session_dir / "system.wav"
+    vtt_path = session_dir / "transcript.vtt"
+
+    if vtt_path.exists():
+        print("[1/3] Parsing VTT transcript (skipping whisperx)…", flush=True)
+        merged = parse_vtt(vtt_path)
+        if not merged:
+            sys.exit(f"VTT parsed to zero segments: {vtt_path}")
+    elif mic.exists() or sys_aud.exists():
+        wx_dir = session_dir / "whisperx"
+        wx_dir.mkdir(exist_ok=True)
+
+        # Single-track case (voice memo, imported recording): diarize the mic file since
+        # it may contain multiple speakers. Two-track case (live capture): mic is always
+        # Cam (no diarization needed), system needs diarization to split "them".
+        single_track = mic.exists() and not sys_aud.exists()
+
+        print(f"[1/4] Transcribing mic track{' (diarized — single-track mode)' if single_track else ''}…", flush=True)
+        mic_json = run_whisperx(mic, wx_dir, diarize=single_track) if mic.exists() else None
+        print("[2/4] Transcribing system track (with diarization)…", flush=True)
+        sys_json = run_whisperx(sys_aud, wx_dir, diarize=True) if sys_aud.exists() else None
+
+        mic_default = "SPEAKER_00" if single_track else "me"
+        mic_segs = load_segments(mic_json, default_speaker=mic_default)
+        sys_segs = load_segments(sys_json, default_speaker="them")
+        merged = sorted(mic_segs + sys_segs, key=lambda s: s["start"])
+
+        if not merged:
+            sys.exit("No speech detected in either track.")
+    else:
+        sys.exit(f"No transcript.vtt or audio tracks in {session_dir}")
+
+    transcript = format_transcript(merged)
+    (session_dir / "transcript.txt").write_text(transcript)
+
+    decision = classify_meeting(meta, merged)
+    print(f"[3/4] Classifier: {decision}", flush=True)
+
+    if decision == "skip":
+        archive_session(session_dir)
+        print(f"Skipped (duration < 5 min): {meta.get('title') or session_dir.name}")
+        return
+
+    if decision == "template":
+        result = make_template_result(meta, merged)
+    else:
+        model = "claude-haiku-4-5-20251001" if decision == "haiku" else CLAUDE_MODEL
+        print(f"[3/4] Summarizing with Claude ({model})…", flush=True)
+        people = list_people(VAULT)
+        projects = list_active_projects(VAULT)
+        glossary = load_glossary(VAULT)
+        result = call_claude(transcript, meta, people, projects, glossary, model=model)
+        (session_dir / "claude.json").write_text(json.dumps(result, indent=2))
+
+    started = meta.get("started_at", "")
+    date_str = started[:10] if len(started) >= 10 else __import__("datetime").date.today().isoformat()
+    slug = slugify(result.get("slug") or result.get("title", ""))
+
+    # If a prep note for this date is awaiting merge, use ITS slug so the
+    # write_meeting_note merge branch triggers. Claude's `slug` field has
+    # drifted (e.g. "viewer-standup-2026-05-07"), and that drift breaks
+    # the path-based merge target lookup downstream.
+    for c in (VAULT / "Meetings").glob(f"{date_str}-*.md"):
+        try:
+            head = c.read_text(errors="ignore")[:1000]
+        except Exception:
+            continue
+        if not re.search(r"^post-meeting-merge:\s*true\s*$", head, re.MULTILINE):
+            continue
+        prep_slug = c.stem[len(date_str) + 1:]
+        prep_tokens = set(re.findall(r"[a-z0-9]+", prep_slug))
+        claude_tokens = set(re.findall(r"[a-z0-9]+", slug))
+        if prep_slug == slug or (prep_tokens and claude_tokens and len(prep_tokens & claude_tokens) >= 2):
+            slug = prep_slug
+            break
+
+    vault_path = f"Meetings/{date_str}-{slug}.md"
+
+    # Transcript lives as a sibling note in Attachments/transcripts/ and is
+    # embedded via ![[…]] from the meeting note. Keeps Meetings/ files small.
+    transcript_stem = f"{date_str}-{slug}-transcript"
+    transcript_attachment = VAULT / "Attachments" / "transcripts" / f"{transcript_stem}.md"
+    transcript_attachment.parent.mkdir(parents=True, exist_ok=True)
+    transcript_attachment.write_text(
+        "---\ntype: transcript\n"
+        f"meeting: \"[[{date_str}-{slug}]]\"\n"
+        f"date: {date_str}\n---\n\n"
+        + render_transcript_attachment(transcript)
+    )
+
+    print(f"[4/4] Writing {vault_path}…", flush=True)
+    fm = {
+        "type": "meeting",
+        "date": date_str,
+        "created": date_str,
+        "meeting-type": result.get("meeting_type", "other"),
+    }
+    if result.get("attendees"):
+        fm["attendees"] = result["attendees"]
+    if result.get("projects"):
+        fm["projects"] = result["projects"]
+    if result.get("tags"):
+        fm["tags"] = result["tags"]
+    if meta.get("source"):
+        fm["transcript-source"] = meta["source"]
+
+    # Series linkage — point back to the most recent prior note with the same
+    # slug. Forward-link is backfilled on the previous note below so you can
+    # navigate the series in either direction.
+    prev = find_previous_meeting(date_str, slug)
+    if prev:
+        fm["previous"] = f"[[{prev}]]"
+
+    status = write_meeting_note(vault_path, fm, render_body(result, transcript_stem))
+    print(f"  → {status}", flush=True)
+
+    if prev:
+        set_frontmatter_field(VAULT / "Meetings" / f"{prev}.md",
+                              "next", f"[[{date_str}-{slug}]]")
+
+    appended = append_action_items_to_inbox(vault_path, result.get("action_items") or [])
+    if appended:
+        print(f"Appended {appended} action item{'s' if appended != 1 else ''} to Inbox.md")
+
+    oq_count = append_open_questions(vault_path, result.get("open_questions") or [], date_str)
+    if oq_count:
+        print(f"Appended {oq_count} open question{'s' if oq_count != 1 else ''} to Open Questions.md")
+
+    archive_session(session_dir)
+
+    print(f"Created: {vault_path}")
+
+
+if __name__ == "__main__":
+    main()

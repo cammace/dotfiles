@@ -1,0 +1,250 @@
+#!/usr/bin/env bash
+# unifi — thin CLI over the UniFi Network controller.
+# Wraps the two endpoint families (Integration v1 for reads, legacy /api/s for
+# writes, because v1 is read-only for clients — PATCH returns 405).
+#
+# Deps: curl, jq, 1Password CLI (`op`). Controller uses a self-signed cert; all
+# calls use `-k`. Key is fetched from 1Password and cached for an hour.
+#
+# Config via env (override if you move controllers):
+#   UNIFI_HOST            default: https://192.168.1.1
+#   UNIFI_SITE            default site UUID (Integration v1)
+#   UNIFI_SITE_SLUG       default: default  (legacy /api/s/<slug>/)
+#   UNIFI_API_KEY_OP_REF  default: op://Homelab/Unifi API Key/credential
+set -euo pipefail
+
+: "${UNIFI_HOST:=https://192.168.1.1}"
+: "${UNIFI_SITE:=88f7af54-98f8-306a-a1c7-c9349722b1f6}"
+: "${UNIFI_SITE_SLUG:=default}"
+: "${UNIFI_API_KEY_OP_REF:=op://Homelab/Unifi API Key/credential}"
+
+CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}"
+KEY_CACHE="$CACHE_DIR/op-unifi-key"
+
+die() { printf 'unifi: %s\n' "$*" >&2; exit 1; }
+
+_stat_mtime() {
+  if stat -f %m "$1" >/dev/null 2>&1; then stat -f %m "$1"; else stat -c %Y "$1"; fi
+}
+
+_key() {
+  if [[ -f "$KEY_CACHE" ]]; then
+    local age=$(( $(date +%s) - $(_stat_mtime "$KEY_CACHE") ))
+    if (( age < 3600 )); then cat "$KEY_CACHE"; return; fi
+  fi
+  local v
+  v="$(op read "$UNIFI_API_KEY_OP_REF")" || die "could not read $UNIFI_API_KEY_OP_REF from 1Password"
+  mkdir -p "$CACHE_DIR"
+  printf '%s' "$v" > "$KEY_CACHE"
+  chmod 600 "$KEY_CACHE"
+  printf '%s' "$v"
+}
+
+_curl() {
+  curl -sk --max-time 15 -H "X-API-KEY: $(_key)" -H "Accept: application/json" "$@"
+}
+
+# Endpoint helpers
+_v1()     { echo "$UNIFI_HOST/proxy/network/integration/v1/sites/$UNIFI_SITE$1"; }
+_legacy() { echo "$UNIFI_HOST/proxy/network/api/s/$UNIFI_SITE_SLUG$1"; }
+
+# ---- selector resolution ----------------------------------------------------
+# Accepts mac (has colons), ipv4 (dotted), or legacy _id / integration id (hex).
+# Prints a JSON object with the legacy record on stdout.
+_resolve_selector() {
+  local sel="$1" body rec
+  case "$sel" in
+    *:*)
+      body="$(_curl "$(_legacy "/rest/user")?mac=$sel")"
+      rec="$(jq -c --arg m "$sel" '.data[] | select(.mac==$m)' <<<"$body" | head -1)"
+      ;;
+    *.*.*.*)
+      # Match by last_ip or fixed_ip so idle clients still resolve.
+      body="$(_curl "$(_legacy "/rest/user")")"
+      rec="$(jq -c --arg ip "$sel" '.data[] | select(.last_ip==$ip or .fixed_ip==$ip)' <<<"$body" | head -1)"
+      ;;
+    *)
+      die "unrecognized selector '$sel' (expected mac, ipv4, or id)"
+      ;;
+  esac
+  [[ -n "$rec" ]] || die "no client found for '$sel'"
+  printf '%s\n' "$rec"
+}
+
+# ---- subcommands ------------------------------------------------------------
+
+cmd_clients() {
+  local recent="" unnamed="" by_network="" raw=""
+  while (($#)); do case "$1" in
+    --recent) recent="${2:-10}"; shift 2 ;;
+    --recent=*) recent="${1#*=}"; shift ;;
+    --unnamed) unnamed=1; shift ;;
+    --by-network) by_network="${2:-}"; shift 2 ;;
+    --by-network=*) by_network="${1#*=}"; shift ;;
+    --raw) raw=1; shift ;;
+    *) die "unknown flag: $1" ;;
+  esac; done
+
+  local v1_json legacy_json
+  v1_json="$(_curl "$(_v1 "/clients")?limit=200")"
+  if [[ -n "$raw" ]]; then printf '%s\n' "$v1_json"; return; fi
+
+  # Default "unnamed" pattern: `<ModelCode> <last4-of-mac>`, e.g. "P110M 9a:22"
+  # or "zigbee2mqtt 14:56". Raw MACs count too.
+  local q='.data | map({name, ip: .ipAddress, mac: .macAddress, type, connectedAt, id})'
+  [[ -n "$unnamed" ]]    && q+=' | map(select(.name | test("^[A-Za-z0-9._-]+ [0-9a-f]{2}:[0-9a-f]{2}$") or test("^([0-9a-f]{2}:){5}[0-9a-f]{2}$")))'
+  [[ -n "$recent" ]]     && q+=" | sort_by(.connectedAt) | reverse | .[0:$recent]"
+
+  if [[ -n "$by_network" ]]; then
+    # Integration v1 omits network name; join with legacy stat/sta.
+    legacy_json="$(_curl "$(_legacy "/stat/sta")")"
+    jq --argjson legacy "$legacy_json" --arg net "$by_network" '
+      .data
+      | map(. as $c
+            | {name, ip: .ipAddress, mac: .macAddress,
+               network: ($legacy.data | map(select(.mac==$c.macAddress))[0].network // null)})
+      | map(select(.network==$net))
+    ' <<<"$v1_json"
+    return
+  fi
+  jq "$q" <<<"$v1_json"
+}
+
+cmd_client_get() {
+  local sel="${1:-}"; [[ -n "$sel" ]] || die "usage: unifi client get <mac|ip|id> [--via integration|legacy]"
+  local via="legacy"
+  shift; while (($#)); do case "$1" in
+    --via) via="${2:-}"; shift 2 ;;
+    --via=*) via="${1#*=}"; shift ;;
+    *) die "unknown flag: $1" ;;
+  esac; done
+
+  if [[ "$via" == "integration" ]]; then
+    # integration expects its own id — resolve via mac match on client list
+    local mac cid
+    if [[ "$sel" == *:* ]]; then mac="$sel"; else mac="$(_resolve_selector "$sel" | jq -r '.mac')"; fi
+    cid="$(_curl "$(_v1 "/clients")?limit=200" | jq -r --arg m "$mac" '.data[] | select(.macAddress==$m) | .id' | head -1)"
+    [[ -n "$cid" ]] || die "no integration-v1 record for mac $mac"
+    _curl "$(_v1 "/clients/$cid")" | jq '.'
+  else
+    _resolve_selector "$sel" | jq '{
+      _id, mac, hostname, name, note, use_fixedip, fixed_ip,
+      network_id, last_connection_network_name, usergroup_id, is_wired
+    }'
+  fi
+}
+
+_client_put() {
+  # $1 selector, $2 JSON body
+  local rec id resp mac ok
+  rec="$(_resolve_selector "$1")"
+  id="$(jq -r '._id' <<<"$rec")"
+  mac="$(jq -r '.mac' <<<"$rec")"
+  resp="$(_curl -X PUT -H "Content-Type: application/json" -d "$2" "$(_legacy "/rest/user/$id")")"
+  ok="$(jq -r '.meta.rc=="ok"' <<<"$resp")"
+  # UniFi returns data:[] for some mutations (e.g. use_fixedip-only PUTs) AND
+  # ignores the `?mac=` query param — so a refetch returns all 163 users.
+  # Filter with jq instead.
+  if [[ "$ok" == "true" ]] && [[ "$(jq '.data | length' <<<"$resp")" == "0" ]]; then
+    local all; all="$(_curl "$(_legacy "/rest/user")")"
+    resp="$(jq -c --arg m "$mac" '{meta:{rc:"ok"}, data:[.data[] | select(.mac==$m)]}' <<<"$all")"
+  fi
+  jq --arg rc_ok "$ok" '{ok: ($rc_ok=="true"),
+                         name: (.data[0].name // null),
+                         note: (.data[0].note // null),
+                         fixed_ip: (.data[0].fixed_ip // null),
+                         use_fixedip: (.data[0].use_fixedip // null)}' <<<"$resp"
+}
+
+cmd_client_rename() {
+  local sel="${1:-}" name="${2:-}"
+  [[ -n "$sel" && -n "$name" ]] || die 'usage: unifi client rename <mac|ip|id> "<new name>"'
+  _client_put "$sel" "$(jq -nc --arg n "$name" '{name:$n}')"
+}
+
+cmd_client_set_note() {
+  local sel="${1:-}" note="${2:-}"
+  [[ -n "$sel" && -n "$note" ]] || die 'usage: unifi client set-note <mac|ip|id> "<note>"'
+  _client_put "$sel" "$(jq -nc --arg n "$note" '{noted:true, note:$n}')"
+}
+
+cmd_client_reserve_ip() {
+  local sel="${1:-}" ip="${2:-}"
+  [[ -n "$sel" ]] || die 'usage: unifi client reserve-ip <mac|ip|id> [<ip>]  (omit ip → reserve current)'
+  if [[ -z "$ip" ]]; then
+    ip="$(_resolve_selector "$sel" | jq -r '.fixed_ip // empty')"
+    if [[ -z "$ip" ]]; then
+      ip="$(_curl "$(_legacy "/stat/sta")" | jq -r --arg m "$(_resolve_selector "$sel" | jq -r .mac)" '.data[] | select(.mac==$m) | .ip' | head -1)"
+    fi
+    [[ -n "$ip" ]] || die "could not determine current IP; pass one explicitly"
+  fi
+  _client_put "$sel" "$(jq -nc --arg ip "$ip" '{use_fixedip:true, fixed_ip:$ip}')"
+}
+
+cmd_client_clear_reservation() {
+  local sel="${1:-}"; [[ -n "$sel" ]] || die 'usage: unifi client clear-reservation <mac|ip|id>'
+  _client_put "$sel" '{"use_fixedip":false}'
+}
+
+cmd_client_update() {
+  local sel="${1:-}" body="${2:-}"
+  [[ -n "$sel" && -n "$body" ]] || die "usage: unifi client update <mac|ip|id> '<json body>'"
+  _client_put "$sel" "$body"
+}
+
+cmd_networks() {
+  _curl "$(_legacy "/rest/networkconf")" \
+    | jq '.data[] | select(.purpose=="corporate" or .purpose=="guest")
+          | {name, _id, vlan, subnet: .ip_subnet, purpose}'
+}
+
+cmd_help() {
+  cat <<'EOF'
+unifi — CLI for the UniFi Network controller
+
+Reads (Integration v1) and writes (legacy /api/s) share one API key from
+1Password. See env vars in the script header to override controller/site/key.
+
+Usage
+  unifi clients [--recent N] [--unnamed] [--by-network NAME] [--raw]
+  unifi client get <mac|ip|id> [--via integration|legacy]
+  unifi client rename <sel> "<new name>"
+  unifi client set-note <sel> "<note>"
+  unifi client reserve-ip <sel> [<ip>]      # omit ip → reserve current
+  unifi client clear-reservation <sel>
+  unifi client update <sel> '<raw json body>'
+  unifi networks
+
+Selectors
+  mac   aa:bb:cc:dd:ee:ff   (colons)
+  ip    192.168.20.53       (dotted)
+  id    <hex>               (legacy _id from `client get`)
+
+Examples
+  unifi clients --recent 5
+  unifi clients --unnamed
+  unifi clients --by-network IoT
+  unifi client get 192.168.20.53
+  unifi client rename ec:75:0c:a5:a6:19 "Plug (Pond Aerator Pump)"
+  unifi client reserve-ip ec:75:0c:a5:a6:19
+EOF
+}
+
+# ---- dispatch ---------------------------------------------------------------
+case "${1:-help}" in
+  clients)            shift; cmd_clients "$@" ;;
+  client)
+    shift
+    case "${1:-}" in
+      get)                shift; cmd_client_get "$@" ;;
+      rename)             shift; cmd_client_rename "$@" ;;
+      set-note)           shift; cmd_client_set_note "$@" ;;
+      reserve-ip)         shift; cmd_client_reserve_ip "$@" ;;
+      clear-reservation)  shift; cmd_client_clear_reservation "$@" ;;
+      update)             shift; cmd_client_update "$@" ;;
+      *) die "unknown client subcommand: ${1:-}"; ;;
+    esac ;;
+  networks)           shift; cmd_networks "$@" ;;
+  help|-h|--help)     cmd_help ;;
+  *) die "unknown command: $1 (try 'unifi help')" ;;
+esac

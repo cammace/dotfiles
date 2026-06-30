@@ -1,0 +1,774 @@
+#!/usr/bin/env python3
+"""
+Clio Meeting Router — poll Microsoft Graph for recently-ended Teams meetings,
+download their transcripts, and feed them through the existing meeting pipeline
+(`clio-meeting process`).
+
+Auth: app-only client_credentials flow against the "Clio Router" Entra app.
+Creds resolved from 1Password via env vars set in ~/.clio/env.
+
+Run periodically via launchd (~/Library/LaunchAgents/com.cam.clio-meeting-router.plist).
+Each run is independent — state file tracks which Teams meeting IDs we've already
+imported so duplicates don't reprocess.
+
+Usage:
+  clio-meeting-router            # one shot — process meetings ended in lookback window
+  clio-meeting-router --dry-run  # report what would happen, no writes
+  clio-meeting-router --hours N  # custom lookback window (default 24)
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import time
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from urllib.parse import quote, unquote, urlencode
+
+import urllib.request
+import urllib.error
+
+CLIO_MEETING_DIR = Path(os.environ.get("CLIO_MEETING_DIR", Path.home() / ".clio" / "meetings"))
+VAULT = Path(os.environ.get("CLIO_MEETING_VAULT", Path.home() / "Documents" / "Clio.nosync"))
+# UPN works for /users/{upn}/calendarView; the OnlineMeetings + transcripts
+# endpoints require an AAD object GUID. Calendar is more forgiving.
+TARGET_USER = os.environ.get("CLIO_ROUTER_TARGET_USER", "")
+TARGET_USER_ID = os.environ.get("CLIO_ROUTER_TARGET_USER_ID", "")
+
+STATE_PATH = CLIO_MEETING_DIR / "router.state.json"
+LOG_DIR = Path.home() / ".clio" / "logs" / "router"
+GRAPH = "https://graph.microsoft.com/v1.0"
+TOKEN_URL_TMPL = "https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token"
+
+# Don't keep retrying meetings whose transcripts never publish.
+MAX_RETRY_AGE_HOURS = 48
+
+
+def log(msg: str) -> None:
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}", flush=True)
+
+
+def op_read(ref: str) -> str:
+    out = subprocess.run(["op", "read", ref], capture_output=True, text=True, check=True)
+    return out.stdout.strip()
+
+
+def _resolve(env_key: str, op_ref_key: str) -> str:
+    # Prefer pre-resolved value (launchd path sources ~/.clio/router.env so no
+    # `op` subprocess fires every 15 min and trips TCC). Fall back to op_read
+    # for interactive runs where only ~/.clio/env (with *_OP_REF vars) is set.
+    val = os.environ.get(env_key)
+    if val:
+        return val
+    return op_read(os.environ[op_ref_key])
+
+
+def get_token() -> str:
+    tenant = _resolve("CLIO_ROUTER_TENANT_ID", "CLIO_ROUTER_TENANT_ID_OP_REF")
+    client_id = _resolve("CLIO_ROUTER_CLIENT_ID", "CLIO_ROUTER_CLIENT_ID_OP_REF")
+    secret = _resolve("CLIO_ROUTER_CLIENT_SECRET", "CLIO_ROUTER_CLIENT_SECRET_OP_REF")
+    body = urlencode({
+        "client_id": client_id,
+        "client_secret": secret,
+        "scope": "https://graph.microsoft.com/.default",
+        "grant_type": "client_credentials",
+    }).encode()
+    url = TOKEN_URL_TMPL.format(tenant=tenant)
+    req = urllib.request.Request(url, data=body, method="POST",
+                                  headers={"Content-Type": "application/x-www-form-urlencoded"})
+    with urllib.request.urlopen(req, timeout=30) as r:
+        return json.loads(r.read())["access_token"]
+
+
+def graph_get(token: str, path: str, params: dict | None = None,
+              accept: str = "application/json", raw: bool = False):
+    url = GRAPH + path
+    if params:
+        url += "?" + urlencode(params, quote_via=quote)
+    req = urllib.request.Request(url, headers={
+        "Authorization": f"Bearer {token}",
+        "Accept": accept,
+    })
+    try:
+        with urllib.request.urlopen(req, timeout=60) as r:
+            data = r.read()
+    except urllib.error.HTTPError as e:
+        body = e.read().decode("utf-8", errors="ignore")
+        raise RuntimeError(f"Graph {e.code} on {path}: {body}") from None
+    if raw:
+        return data
+    return json.loads(data)
+
+
+def load_state() -> dict:
+    if STATE_PATH.exists():
+        try:
+            return json.loads(STATE_PATH.read_text())
+        except Exception:
+            pass
+    return {"imported": {}, "tried": {}}
+
+
+def save_state(state: dict) -> None:
+    STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    STATE_PATH.write_text(json.dumps(state, indent=2, sort_keys=True))
+
+
+def list_recent_teams_events(token: str, hours_back: int) -> list[dict]:
+    """Return calendar events that started within the lookback window AND have
+    isOnlineMeeting=true. Events still in progress are excluded — transcripts
+    only publish after the meeting ends."""
+    now = datetime.now(timezone.utc)
+    after = (now - timedelta(hours=hours_back)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    before = (now + timedelta(minutes=5)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    select = "id,subject,start,end,isOnlineMeeting,onlineMeetingProvider,onlineMeeting,attendees,organizer,iCalUId"
+    res = graph_get(token, f"/users/{TARGET_USER}/calendarView", {
+        "startDateTime": after,
+        "endDateTime": before,
+        "$select": select,
+        "$top": "100",
+        "$orderby": "start/dateTime desc",
+    })
+    out = []
+    for ev in res.get("value", []):
+        if not ev.get("isOnlineMeeting"):
+            continue
+        if ev.get("onlineMeetingProvider") != "teamsForBusiness":
+            continue
+        join_url = (ev.get("onlineMeeting") or {}).get("joinUrl")
+        if not join_url:
+            continue
+        # Skip events still in progress
+        end_dt = parse_graph_dt(ev["end"]["dateTime"])
+        if end_dt > now + timedelta(minutes=2):
+            continue
+        # Meetings organized by someone else need the organizer's AAD GUID for
+        # OnlineMeetings/transcripts lookups — Graph's onlineMeeting resource
+        # lives under the organizer's scope, not the attendee's. The Oid is
+        # embedded in the joinUrl `context` blob; parse it to avoid a User.Read.All
+        # roundtrip. Also requires Grant-CsApplicationAccessPolicy to include the
+        # organizer in the tenant's Teams app access policy.
+        oid = _organizer_oid_from_join_url(join_url)
+        if oid and oid != TARGET_USER_ID:
+            ev["_organizer_id"] = oid
+        out.append(ev)
+    return out
+
+
+def _organizer_oid_from_join_url(join_url: str) -> str | None:
+    """Extract the organizer's AAD object id from a Teams joinUrl.
+    The `context` query param decodes to {"Tid":"...","Oid":"..."}."""
+    m = re.search(r"context=([^&]+)", join_url)
+    if not m:
+        return None
+    try:
+        ctx = json.loads(unquote(m.group(1)))
+    except Exception:
+        return None
+    oid = ctx.get("Oid")
+    return oid if isinstance(oid, str) and oid else None
+
+
+def parse_graph_dt(s: str) -> datetime:
+    # Graph datetimes look like "2026-05-05T17:00:00.0000000" with no tz suffix in calendarView
+    s = s.rstrip("Z")
+    if "." in s:
+        head, frac = s.split(".", 1)
+        s = f"{head}.{frac[:6]}"
+    return datetime.fromisoformat(s).replace(tzinfo=timezone.utc)
+
+
+def slugify(s: str) -> str:
+    s = (s or "").lower()
+    s = re.sub(r"[^a-z0-9]+", "-", s).strip("-")
+    return s or "untitled"
+
+
+def vault_note_exists_for(event: dict) -> Path | None:
+    """Return the existing vault note path if a Meeting note for this event
+    appears to be already imported. Heuristic: any Meetings/<date>-*.md whose
+    fuzzy-slug overlaps the event's subject. False positives are tolerable —
+    the daemon errs on the side of skipping rather than duplicating.
+
+    Also catches prep notes like 2026-05-05-viewer-standup.md (post-meeting-merge)
+    so the daemon will still process and merge into them."""
+    start = parse_graph_dt(event["start"]["dateTime"])
+    date_str = start.date().isoformat()
+    slug = slugify(event.get("subject", ""))
+    candidates = list((VAULT / "Meetings").glob(f"{date_str}-*.md"))
+    for c in candidates:
+        cslug = c.stem[len(date_str) + 1:]
+        # Strong match: prep note or already-imported note with same/similar slug
+        if cslug == slug or cslug.startswith(slug) or slug.startswith(cslug):
+            return c
+        # Token overlap (handle title drift like "Mike + Cam" → "mike-cam-1on1")
+        a = set(re.findall(r"[a-z0-9]+", cslug))
+        b = set(re.findall(r"[a-z0-9]+", slug))
+        if a and b and len(a & b) >= 2:
+            return c
+    return None
+
+
+def find_online_meeting_id(token: str, join_url: str, user_id: str | None = None) -> str | None:
+    """Look up the Graph onlineMeeting resource for a given joinWebUrl.
+
+    `user_id` overrides the default (Cam) — used when the meeting was organized
+    by someone else and we discovered it via callRecords."""
+    user = user_id or TARGET_USER_ID
+    res = graph_get(token, f"/users/{user}/onlineMeetings", {
+        "$filter": f"JoinWebUrl eq '{join_url}'",
+    })
+    vals = res.get("value") or []
+    return vals[0]["id"] if vals else None
+
+
+def list_transcripts(token: str, meeting_id: str, user_id: str | None = None) -> list[dict]:
+    user = user_id or TARGET_USER_ID
+    res = graph_get(token, f"/users/{user}/onlineMeetings/{meeting_id}/transcripts")
+    return res.get("value") or []
+
+
+def pick_transcript_for(transcripts: list[dict], event_start: datetime) -> dict | None:
+    """Pick the transcript whose createdDateTime is closest to (and >=) the
+    event start. Recurring meetings have many transcripts under one onlineMeeting
+    resource; we want the one that corresponds to *this* occurrence."""
+    if not transcripts:
+        return None
+    annotated = []
+    for t in transcripts:
+        try:
+            cdt = datetime.fromisoformat(t["createdDateTime"].rstrip("Z")).replace(tzinfo=timezone.utc)
+        except Exception:
+            continue
+        annotated.append((cdt, t))
+    if not annotated:
+        return None
+    # Closest to event_start
+    annotated.sort(key=lambda r: abs((r[0] - event_start).total_seconds()))
+    cdt, t = annotated[0]
+    # Sanity check: must be within ±2h of event start
+    if abs((cdt - event_start).total_seconds()) > 2 * 3600:
+        return None
+    return t
+
+
+def fetch_vtt(token: str, meeting_id: str, transcript_id: str, user_id: str | None = None) -> bytes:
+    user = user_id or TARGET_USER_ID
+    return graph_get(token,
+                     f"/users/{user}/onlineMeetings/{meeting_id}/transcripts/{transcript_id}/content",
+                     {"$format": "text/vtt"},
+                     accept="text/vtt", raw=True)
+
+
+def list_recent_call_records(token: str, hours_back: int) -> list[dict]:
+    """Return synthetic event dicts for callRecords where Cam was a participant
+    AND the call has a Teams onlineMeeting (joinWebUrl present). Catches ad-hoc
+    meetings ('Meet Now' / call-from-chat) that have no calendar event.
+
+    Each returned dict matches the calendarView shape so the main loop's dedup
+    + transcript-fetch logic works unchanged. The synthetic id is prefixed
+    `callrecord:` so it can't collide with calendar event ids in state.
+
+    Requires Application permission CallRecords.Read.All on the Graph app reg —
+    raises RuntimeError on 403 if missing."""
+    now = datetime.now(timezone.utc)
+    after = (now - timedelta(hours=hours_back)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    before = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+    # callRecords requires a bounded startDateTime window — open-ended filters
+    # ($filter=lastModifiedDateTime ge X) return BadRequest.
+    res = graph_get(token, "/communications/callRecords", {
+        "$filter": f"startDateTime ge {after} and startDateTime lt {before}",
+    })
+    out = []
+    for cr_summary in res.get("value", []):
+        if cr_summary.get("type") not in ("groupCall", "peerToPeer"):
+            continue
+        if not cr_summary.get("endDateTime"):
+            continue
+        # Need joinWebUrl to resolve the onlineMeeting downstream
+        if not cr_summary.get("joinWebUrl"):
+            continue
+        # participants_v2 only populates via $expand. The userIdentity is nested
+        # at .identity.user.id, not .user.id directly.
+        try:
+            cr = graph_get(token, f"/communications/callRecords/{cr_summary['id']}",
+                           {"$expand": "participants_v2"})
+        except Exception:
+            continue
+        # Cam in participants?
+        cam_present = False
+        for p in cr.get("participants_v2") or []:
+            user = ((p.get("identity") or {}).get("user") or {})
+            if user.get("id") == TARGET_USER_ID:
+                cam_present = True
+                break
+        if not cam_present:
+            continue
+        organizer_id = ((cr.get("organizer_v2") or {}).get("identity") or {}).get("user", {}).get("id")
+        if not organizer_id:
+            continue
+        out.append({
+            "id": f"callrecord:{cr['id']}",
+            "subject": "Ad-hoc call",  # better title resolved later from onlineMeeting if available
+            "start": {"dateTime": cr["startDateTime"]},
+            "end": {"dateTime": cr["endDateTime"]},
+            "isOnlineMeeting": True,
+            "onlineMeetingProvider": "teamsForBusiness",
+            "onlineMeeting": {"joinUrl": cr["joinWebUrl"]},
+            "_organizer_id": organizer_id,
+        })
+    return out
+
+
+def stage_session(event: dict, vtt: bytes, meeting_id: str, *,
+                  source: str = "teams-router",
+                  extra_meta: dict | None = None) -> str:
+    """Drop a session dir at ~/.clio/meetings/sessions/<id>/. Returns the session id."""
+    start = parse_graph_dt(event["start"]["dateTime"])
+    sid = start.astimezone().strftime("%Y%m%d-%H%M%S")
+    session = CLIO_MEETING_DIR / "sessions" / sid
+    session.mkdir(parents=True, exist_ok=True)
+    (session / "transcript.vtt").write_bytes(vtt)
+
+    # Build attendee list, Cam first
+    attendees = []
+    org = (event.get("organizer") or {}).get("emailAddress", {})
+    if org.get("name"):
+        attendees.append(org["name"])
+    for a in event.get("attendees") or []:
+        nm = (a.get("emailAddress") or {}).get("name")
+        if nm and nm not in attendees:
+            attendees.append(nm)
+    if "Cam Mace" in attendees:
+        attendees = ["Cam Mace"] + [n for n in attendees if n != "Cam Mace"]
+
+    meta = {
+        "session_id": sid,
+        "title": event.get("subject", ""),
+        "attendees": ", ".join(attendees),
+        "started_at": start.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "source": source,
+        "meeting_id": meeting_id,
+        "event_id": event["id"],
+    }
+    if extra_meta:
+        meta.update(extra_meta)
+    (session / "metadata.json").write_text(json.dumps(meta, indent=2))
+    return sid
+
+
+# --- Granola fallback / discovery ---------------------------------------
+# When Teams doesn't surface a transcript (organizer didn't enable Teams
+# transcription, or meeting was Granola-only), fall back to the Granola
+# desktop app's recordings via api.granola.ai. See clio-granola-fetch.
+
+import importlib.util as _imp_util
+import importlib.machinery as _imp_mach
+
+def _load_granola():
+    """Lazy-import clio-granola-fetch as a module. Returns None if the helper
+    script isn't on PATH or fails to load — caller treats Granola as unavailable.
+    The helper has no `.py` extension, so we hand spec_from_file_location an
+    explicit SourceFileLoader."""
+    bin_path = shutil.which("clio-granola-fetch")
+    if not bin_path:
+        return None
+    try:
+        loader = _imp_mach.SourceFileLoader("clio_granola_fetch", bin_path)
+        spec = _imp_util.spec_from_loader("clio_granola_fetch", loader)
+        mod = _imp_util.module_from_spec(spec)
+        loader.exec_module(mod)
+        return mod
+    except Exception as e:
+        log(f"  granola: helper load failed ({e}) — fallback disabled")
+        return None
+
+
+def granola_match(ev: dict, granola_docs: list[dict]) -> dict | None:
+    """Find the Granola doc that corresponds to a Teams calendar event.
+
+    Match priority (all require start-time proximity within 15 min to handle
+    recurring series, which share one iCalUID across occurrences):
+      1. iCalUID match + start within 15 min
+      2. joinUrl match + start within 15 min
+      3. title-token overlap (>=2) + start within 15 min
+    Falls back to created_at when calendar start is unavailable on the Granola
+    side (ad-hoc Granola docs without a linked calendar event)."""
+    ical = ev.get("iCalUId")
+    join = (ev.get("onlineMeeting") or {}).get("joinUrl")
+    ev_start = parse_graph_dt(ev["start"]["dateTime"])
+    ev_title_tokens = set(re.findall(r"[a-z0-9]+", (ev.get("subject") or "").lower()))
+    for d in granola_docs:
+        # Try both the calendar-event start AND created_at — recurring series
+        # have google_calendar_event.start pointing at the next occurrence,
+        # so created_at (when Granola recorded) is the reliable proxy for
+        # "when this meeting actually happened".
+        d_candidates = [t for t in (d.get("start"), d.get("created_at")) if t]
+        if not d_candidates:
+            continue
+        close = any(abs((t - ev_start).total_seconds()) <= 900 for t in d_candidates)
+        if not close:
+            continue
+        if ical and d.get("ical_uid") == ical:
+            return d
+        if join and d.get("join_url") == join:
+            return d
+        d_tokens = set(re.findall(r"[a-z0-9]+", (d.get("title") or "").lower()))
+        if d_tokens & ev_title_tokens and len(d_tokens & ev_title_tokens) >= 2:
+            return d
+    return None
+
+
+def synth_event_from_granola(doc: dict) -> dict:
+    """Build a calendarView-shaped event dict from a Granola normalized doc so
+    stage_session works unchanged. id is prefixed `granola:` so it can't collide
+    with Graph event ids in state.
+
+    Uses created_at as the meeting timestamp — NOT the calendar event's start.
+    For recurring series, Granola's google_calendar_event.start points at the
+    next occurrence, but created_at reflects when Granola actually recorded the
+    occurrence we're importing."""
+    start = doc["created_at"] or doc["start"]
+    end = doc["end"] if (doc["end"] and doc["created_at"] and doc["end"] > doc["created_at"]) \
+          else (start + timedelta(minutes=30) if start else None)
+    return {
+        "id": f"granola:{doc['id']}",
+        "subject": doc["title"],
+        "start": {"dateTime": start.strftime("%Y-%m-%dT%H:%M:%SZ") if start else ""},
+        "end": {"dateTime": end.strftime("%Y-%m-%dT%H:%M:%SZ") if end else ""},
+        "isOnlineMeeting": True,
+        "onlineMeetingProvider": "granola",
+        "onlineMeeting": {"joinUrl": doc.get("join_url") or ""},
+        "organizer": {"emailAddress": {}},
+        "attendees": [
+            {"emailAddress": {"name": n}} for n in (doc.get("attendees") or [])
+        ],
+    }
+
+
+def process_session(session_id: str, classifier_override: str | None = None) -> bool:
+    """Run the existing pipeline. Returns True on success.
+
+    classifier_override forces the synthesis tier (skip|template|haiku|sonnet)
+    via CLIO_MEETING_CLASSIFIER_OVERRIDE — used for summary-derived sessions,
+    whose synthetic VTT timestamps would otherwise trip the <5-min skip."""
+    env = dict(os.environ)
+    # Per ~/.claude/.../feedback_scrub_anthropic_api_key_subprocess.md
+    env.pop("ANTHROPIC_API_KEY", None)
+    if classifier_override:
+        env["CLIO_MEETING_CLASSIFIER_OVERRIDE"] = classifier_override
+    # Call the Python pipeline directly. The `clio-meeting` bash dispatcher
+    # only adds a `case` over subcommands — bypassing it keeps Homebrew bash
+    # out of the launchd path (TCC re-prompts on every brew upgrade).
+    proc = subprocess.run(
+        ["clio-meeting-process", session_id],
+        env=env, cwd=str(VAULT),
+    )
+    return proc.returncode == 0
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--hours", type=int, default=24,
+                    help="Lookback window in hours (default 24)")
+    ap.add_argument("--dry-run", action="store_true",
+                    help="Report what would happen; don't fetch transcripts or write files")
+    ap.add_argument("--no-granola", action="store_true",
+                    help="Skip Granola fallback/discovery; Teams-only behavior")
+    args = ap.parse_args()
+
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    state = load_state()
+
+    log(f"Lookback {args.hours}h. Target user: {TARGET_USER}.")
+    if not TARGET_USER_ID:
+        log("FATAL: CLIO_ROUTER_TARGET_USER_ID not set in env (need AAD object GUID for OnlineMeetings endpoints).")
+        return 2
+    try:
+        token = get_token()
+    except Exception as e:
+        log(f"FATAL: token acquisition failed: {e}")
+        return 2
+
+    try:
+        events = list_recent_teams_events(token, args.hours)
+    except Exception as e:
+        log(f"FATAL: calendarView failed: {e}")
+        return 2
+
+    # Layer 2: callRecords — catches ad-hoc Teams meetings (Meet Now / chat call)
+    # that have no calendar entry. Dedup against calendar by joinUrl so a single
+    # scheduled meeting only enters the loop once.
+    try:
+        call_events = list_recent_call_records(token, args.hours)
+    except Exception as e:
+        log(f"  callRecords lookup failed (non-fatal — only ad-hoc meetings affected): {e}")
+        call_events = []
+    cal_urls = {e["onlineMeeting"]["joinUrl"] for e in events}
+    extra = [c for c in call_events if c["onlineMeeting"]["joinUrl"] not in cal_urls]
+    if extra:
+        log(f"  +{len(extra)} ad-hoc meeting(s) from callRecords")
+        events += extra
+
+    log(f"Found {len(events)} candidate Teams meetings in window.")
+
+    # Pre-fetch Granola docs (used as fallback when Teams transcript missing,
+    # and for Granola-only meetings discovered in the post-loop pass).
+    granola_mod = _load_granola()
+    granola_docs: list[dict] = []
+    if granola_mod is not None and not args.no_granola:
+        try:
+            granola_docs = granola_mod.list_recent_meetings(hours_back=args.hours)
+            log(f"  granola: {len(granola_docs)} doc(s) in window")
+        except Exception as e:
+            log(f"  granola list failed (non-fatal): {e}")
+            granola_docs = []
+
+    imported = 0
+    imported_granola = 0
+    skipped_existing = 0
+    pending_no_transcript = 0
+    granola_matched_event_ids: set[str] = set()
+
+    now = datetime.now(timezone.utc)
+
+    def _try_granola_fallback(ev, ev_id, title, tries) -> bool:
+        """Attempt Granola fallback for a Teams event with no Teams transcript.
+        Only fires once the meeting ended >= 30 min ago. Returns True if imported."""
+        if granola_mod is None or not granola_docs:
+            return False
+        end_dt = parse_graph_dt(ev["end"]["dateTime"])
+        if (now - end_dt).total_seconds() < 1800:
+            return False
+        match = granola_match(ev, granola_docs)
+        if not match:
+            return False
+        # If this Granola doc was already imported (under granola:* or another
+        # event's fallback), don't re-stage — just point this event at the same
+        # session so future runs don't keep retrying.
+        for k, s in state["imported"].items():
+            if isinstance(s, dict) and s.get("granola_doc_id") == match["id"]:
+                log(f"    granola doc {match['id']} already imported under {k} — linking")
+                state["imported"][ev_id] = {
+                    "reason": "imported (granola fallback — deduped)",
+                    "granola_doc_id": match["id"],
+                    "session_id": s.get("session_id"),
+                    "imported_at": now.isoformat(),
+                }
+                state["tried"].pop(ev_id, None)
+                return True
+        log(f"    granola: matched to doc {match['id']} ({match['title'][:50]})")
+        try:
+            vtt, gsrc = granola_mod.fetch_best_vtt(match["id"])
+        except Exception as e:
+            log(f"    granola fetch failed: {e}")
+            return False
+        if len(vtt) < 32:
+            log("    granola: no transcript or summary — skip")
+            return False
+        src = "granola-fallback" if gsrc == "granola" else "granola-summary-fallback"
+        if gsrc == "granola-summary":
+            log("    granola transcript paywalled — using AI summary")
+        sid = stage_session(ev, vtt, f"granola:{match['id']}",
+                            source=src,
+                            extra_meta={"granola_doc_id": match["id"]})
+        log(f"    staged session {sid} ({len(vtt)} VTT bytes) → running pipeline…")
+        ok = process_session(sid, classifier_override="haiku" if gsrc == "granola-summary" else None)
+        if ok:
+            log(f"    ✓ imported via granola [{title}]")
+            state["imported"][ev_id] = {
+                "reason": "imported (granola fallback)",
+                "session_id": sid,
+                "granola_doc_id": match["id"],
+                "imported_at": now.isoformat(),
+            }
+            state["tried"].pop(ev_id, None)
+            granola_matched_event_ids.add(ev_id)
+            return True
+        log(f"    ✗ granola pipeline failed for {sid}")
+        return False
+
+    for ev in events:
+        ev_id = ev["id"]
+        start = parse_graph_dt(ev["start"]["dateTime"])
+        end = parse_graph_dt(ev["end"]["dateTime"])
+        title = ev.get("subject", "")
+        join_url = ev["onlineMeeting"]["joinUrl"]
+
+        if state["imported"].get(ev_id):
+            continue
+
+        existing = vault_note_exists_for(ev)
+        if existing and not (existing.read_text().find("post-meeting-merge: true") >= 0):
+            log(f"  skip [{title}] {start.strftime('%Y-%m-%d %H:%M')} — vault note exists ({existing.name})")
+            state["imported"][ev_id] = {"reason": "vault note already present", "path": str(existing)}
+            skipped_existing += 1
+            continue
+
+        # Give meeting at least 5 min after end before chasing the transcript.
+        if (now - end).total_seconds() < 300:
+            log(f"  defer [{title}] — ended <5 min ago, transcript not ready")
+            continue
+
+        # Don't retry forever
+        tries = state["tried"].get(ev_id, {"count": 0, "first": now.isoformat()})
+        first_seen = datetime.fromisoformat(tries["first"])
+        if (now - first_seen).total_seconds() > MAX_RETRY_AGE_HOURS * 3600:
+            log(f"  abandon [{title}] — no transcript after {MAX_RETRY_AGE_HOURS}h")
+            state["imported"][ev_id] = {"reason": "abandoned — no transcript"}
+            continue
+
+        log(f"  try   [{title}] {start.strftime('%Y-%m-%d %H:%M')}")
+
+        if args.dry_run:
+            continue
+
+        # callRecord-derived events organize under a different user; thread the
+        # organizer id through to the onlineMeeting + transcript endpoints.
+        organizer_id = ev.get("_organizer_id")
+
+        try:
+            mid = find_online_meeting_id(token, join_url, user_id=organizer_id)
+        except Exception as e:
+            log(f"    onlineMeetings lookup failed: {e} — trying granola")
+            if _try_granola_fallback(ev, ev_id, title, tries):
+                imported_granola += 1
+                save_state(state)
+                continue
+            tries["count"] += 1
+            tries["last"] = now.isoformat()
+            state["tried"][ev_id] = tries
+            continue
+
+        if not mid:
+            log("    no onlineMeeting found by joinWebUrl — trying granola")
+            if _try_granola_fallback(ev, ev_id, title, tries):
+                imported_granola += 1
+                save_state(state)
+                continue
+            tries["count"] += 1
+            tries["last"] = now.isoformat()
+            state["tried"][ev_id] = tries
+            continue
+
+        try:
+            transcripts = list_transcripts(token, mid, user_id=organizer_id)
+        except Exception as e:
+            log(f"    transcripts list failed: {e} — trying granola")
+            if _try_granola_fallback(ev, ev_id, title, tries):
+                imported_granola += 1
+                save_state(state)
+                continue
+            tries["count"] += 1
+            tries["last"] = now.isoformat()
+            state["tried"][ev_id] = tries
+            continue
+
+        chosen = pick_transcript_for(transcripts, start)
+        if not chosen:
+            log(f"    no transcript yet (have {len(transcripts)}, none match start) — trying granola")
+            if _try_granola_fallback(ev, ev_id, title, tries):
+                imported_granola += 1
+                save_state(state)
+                continue
+            tries["count"] += 1
+            tries["last"] = now.isoformat()
+            state["tried"][ev_id] = tries
+            pending_no_transcript += 1
+            continue
+
+        try:
+            vtt = fetch_vtt(token, mid, chosen["id"], user_id=organizer_id)
+        except Exception as e:
+            log(f"    VTT download failed: {e}")
+            tries["count"] += 1
+            tries["last"] = now.isoformat()
+            state["tried"][ev_id] = tries
+            continue
+
+        sid = stage_session(ev, vtt, mid)
+        log(f"    staged session {sid} ({len(vtt)} VTT bytes) → running pipeline…")
+        ok = process_session(sid)
+        if ok:
+            log(f"    ✓ imported [{title}]")
+            state["imported"][ev_id] = {
+                "reason": "imported",
+                "session_id": sid,
+                "imported_at": now.isoformat(),
+            }
+            state["tried"].pop(ev_id, None)
+            imported += 1
+        else:
+            log(f"    ✗ pipeline failed for {sid} — will retry next run")
+            tries["count"] += 1
+            tries["last"] = now.isoformat()
+            state["tried"][ev_id] = tries
+
+        save_state(state)
+
+    # Granola-only pass: any Granola doc not matched to a Teams event in the
+    # loop above. Catches Zoom, in-person, phone calls — anything Granola
+    # captured but Teams calendar doesn't know about.
+    if granola_mod is not None and granola_docs and not args.dry_run:
+        for d in granola_docs:
+            gkey = f"granola:{d['id']}"
+            if state["imported"].get(gkey):
+                continue
+            # Was this doc already absorbed as a Teams-event fallback above?
+            if any(s.get("granola_doc_id") == d["id"]
+                   for s in state["imported"].values() if isinstance(s, dict)):
+                continue
+            # Does this doc correspond to a Teams event we're already handling?
+            matched_to_event = False
+            for ev in events:
+                if granola_match(ev, [d]) is not None:
+                    matched_to_event = True
+                    break
+            if matched_to_event:
+                continue
+            synth = synth_event_from_granola(d)
+            existing = vault_note_exists_for(synth)
+            if existing and "post-meeting-merge: true" not in existing.read_text():
+                state["imported"][gkey] = {"reason": "vault note already present",
+                                            "path": str(existing)}
+                continue
+            log(f"  granola-only [{d['title']}] {d['start'].strftime('%Y-%m-%d %H:%M') if d['start'] else '?'}")
+            try:
+                vtt, gsrc = granola_mod.fetch_best_vtt(d["id"])
+            except Exception as e:
+                log(f"    granola fetch failed: {e}")
+                continue
+            if len(vtt) < 32:
+                log("    no transcript or summary — skip")
+                continue
+            src = "granola-only" if gsrc == "granola" else "granola-only-summary"
+            if gsrc == "granola-summary":
+                log("    granola transcript paywalled — using AI summary")
+            sid = stage_session(synth, vtt, gkey,
+                                source=src,
+                                extra_meta={"granola_doc_id": d["id"]})
+            log(f"    staged session {sid} ({len(vtt)} VTT bytes) → running pipeline…")
+            if process_session(sid, classifier_override="haiku" if gsrc == "granola-summary" else None):
+                log(f"    ✓ imported [{d['title']}]")
+                state["imported"][gkey] = {
+                    "reason": "imported (granola-only)",
+                    "session_id": sid,
+                    "granola_doc_id": d["id"],
+                    "imported_at": now.isoformat(),
+                }
+                imported_granola += 1
+                save_state(state)
+
+    save_state(state)
+    log(f"Done. imported={imported} imported_granola={imported_granola} "
+        f"skipped_existing={skipped_existing} pending_no_transcript={pending_no_transcript}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+# Stop the active recording cleanly (SIGINT so ffmpeg finalizes WAV headers),
+# then kick off the transcription + summary pipeline in the background.
+set -euo pipefail
+
+: "${CLIO_MEETING_DIR:?CLIO_MEETING_DIR not set}"
+
+PID_FILE="$CLIO_MEETING_DIR/active.pid"
+SESSION_FILE="$CLIO_MEETING_DIR/active.session"
+
+[ -f "$PID_FILE" ] || { echo "No active recording." >&2; exit 1; }
+
+PID="$(cat "$PID_FILE")"
+SESSION_ID="$(cat "$SESSION_FILE" 2>/dev/null || true)"
+
+if kill -0 "$PID" 2>/dev/null; then
+  kill -INT "$PID" || true
+  for _ in $(seq 1 50); do
+    kill -0 "$PID" 2>/dev/null || break
+    sleep 0.2
+  done
+  if kill -0 "$PID" 2>/dev/null; then
+    kill -KILL "$PID" 2>/dev/null || true
+  fi
+fi
+
+rm -f "$PID_FILE" "$SESSION_FILE"
+
+if [ -z "$SESSION_ID" ]; then
+  echo "Session file missing — not triggering processing." >&2
+  exit 1
+fi
+
+echo "Stopped session $SESSION_ID. Processing in background…"
+nohup clio-meeting-process "$SESSION_ID" \
+  > "$CLIO_MEETING_DIR/sessions/$SESSION_ID/process.log" 2>&1 &
+disown

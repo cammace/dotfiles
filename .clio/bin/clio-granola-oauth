@@ -1,0 +1,407 @@
+#!/usr/bin/env python3
+"""
+Clio Granola OAuth — OAuth 2.0 + PKCE client for Granola's MCP server.
+
+Granola's MCP at https://mcp.granola.ai/mcp requires OAuth 2.0 authentication
+against the issuer at https://mcp-auth.granola.ai (discovered via
+/.well-known/oauth-authorization-server).
+
+This script handles:
+  - One-time interactive auth (browser-based) via authorization_code + PKCE
+  - Token refresh via the persisted refresh_token (no browser interaction)
+  - Tools/list probe to introspect what Granola's MCP exposes
+  - Generic tools/call so other scripts can route through MCP
+
+Usage:
+    clio-granola-oauth auth                 # interactive — opens browser
+    clio-granola-oauth refresh              # refresh access_token from refresh_token
+    clio-granola-oauth status               # show token state (no refresh)
+    clio-granola-oauth probe                # tools/list against MCP
+    clio-granola-oauth call <tool> <args>   # tools/call with JSON args
+
+Token storage:
+    ~/.clio/granola-oauth.json (mode 600)
+    Schema: {
+      client_id: str,
+      access_token: str,
+      refresh_token: str,
+      expires_at: float (unix ts),
+      scope: str,
+      obtained_at: float (unix ts)
+    }
+"""
+from __future__ import annotations
+
+import argparse
+import base64
+import hashlib
+import http.server
+import json
+import os
+import secrets
+import socket
+import sys
+import threading
+import time
+import urllib.parse
+import urllib.request
+import webbrowser
+from pathlib import Path
+
+# Granola OAuth + MCP endpoints (discovered via /.well-known/oauth-authorization-server)
+AS_ISSUER = "https://mcp-auth.granola.ai"
+AUTHORIZATION_ENDPOINT = f"{AS_ISSUER}/oauth2/authorize"
+TOKEN_ENDPOINT = f"{AS_ISSUER}/oauth2/token"
+REGISTRATION_ENDPOINT = f"{AS_ISSUER}/oauth2/register"
+MCP_URL = "https://mcp.granola.ai/mcp"
+
+SCOPE = "email offline_access openid profile"
+TOKEN_PATH = Path.home() / ".clio" / "granola-oauth.json"
+CLIENT_NAME = "Clio Router"
+
+
+# -------------------------- token persistence --------------------------------
+
+def _load_state() -> dict | None:
+    if not TOKEN_PATH.exists():
+        return None
+    try:
+        return json.loads(TOKEN_PATH.read_text())
+    except json.JSONDecodeError:
+        return None
+
+
+def _save_state(state: dict) -> None:
+    TOKEN_PATH.parent.mkdir(parents=True, exist_ok=True)
+    # write atomically, mode 600
+    tmp = TOKEN_PATH.with_suffix(".tmp")
+    tmp.write_text(json.dumps(state, indent=2))
+    tmp.chmod(0o600)
+    tmp.replace(TOKEN_PATH)
+
+
+# -------------------------- PKCE + dynamic client ----------------------------
+
+def _pkce_pair() -> tuple[str, str]:
+    """Return (code_verifier, code_challenge) per RFC 7636."""
+    verifier = base64.urlsafe_b64encode(secrets.token_bytes(32)).rstrip(b"=").decode()
+    challenge = base64.urlsafe_b64encode(
+        hashlib.sha256(verifier.encode()).digest()
+    ).rstrip(b"=").decode()
+    return verifier, challenge
+
+
+def _register_client(redirect_uri: str) -> str:
+    """Dynamic client registration → returns client_id. Public client (no secret)."""
+    body = json.dumps({
+        "client_name": CLIENT_NAME,
+        "redirect_uris": [redirect_uri],
+        "grant_types": ["authorization_code", "refresh_token"],
+        "response_types": ["code"],
+        "token_endpoint_auth_method": "none",
+        "scope": SCOPE,
+    }).encode()
+    req = urllib.request.Request(
+        REGISTRATION_ENDPOINT,
+        data=body,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=30) as r:
+        resp = json.loads(r.read())
+    if "client_id" not in resp:
+        raise RuntimeError(f"Registration did not return client_id: {resp}")
+    return resp["client_id"]
+
+
+# -------------------------- local redirect handler ---------------------------
+
+class _RedirectCatcher(http.server.BaseHTTPRequestHandler):
+    captured = {}
+
+    def do_GET(self):  # noqa: N802
+        parsed = urllib.parse.urlparse(self.path)
+        if parsed.path != "/callback":
+            self.send_response(404)
+            self.end_headers()
+            return
+        params = dict(urllib.parse.parse_qsl(parsed.query))
+        self.__class__.captured.update(params)
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.end_headers()
+        if "code" in params:
+            self.wfile.write(
+                b"<h2>Granola auth complete</h2><p>You can close this tab; "
+                b"the script captured the code.</p>"
+            )
+        else:
+            err = params.get("error", "unknown")
+            self.wfile.write(
+                f"<h2>Granola auth failed</h2><p>error: {err}</p>".encode()
+            )
+
+    def log_message(self, *_args):  # silence default stderr logging
+        pass
+
+
+def _find_free_port() -> int:
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()
+    return port
+
+
+# -------------------------- token requests -----------------------------------
+
+def _exchange_code_for_tokens(
+    code: str, client_id: str, code_verifier: str, redirect_uri: str
+) -> dict:
+    body = urllib.parse.urlencode({
+        "grant_type": "authorization_code",
+        "code": code,
+        "redirect_uri": redirect_uri,
+        "client_id": client_id,
+        "code_verifier": code_verifier,
+    }).encode()
+    req = urllib.request.Request(
+        TOKEN_ENDPOINT, data=body,
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            return json.loads(r.read())
+    except urllib.error.HTTPError as e:
+        raise RuntimeError(f"Token exchange failed {e.code}: {e.read().decode()}") from None
+
+
+def _refresh_tokens(refresh_token: str, client_id: str) -> dict:
+    body = urllib.parse.urlencode({
+        "grant_type": "refresh_token",
+        "refresh_token": refresh_token,
+        "client_id": client_id,
+    }).encode()
+    req = urllib.request.Request(
+        TOKEN_ENDPOINT, data=body,
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            return json.loads(r.read())
+    except urllib.error.HTTPError as e:
+        raise RuntimeError(f"Token refresh failed {e.code}: {e.read().decode()}") from None
+
+
+# -------------------------- top-level operations -----------------------------
+
+def cmd_auth() -> int:
+    """Interactive OAuth dance: register client → PKCE → browser → token exchange."""
+    port = _find_free_port()
+    redirect_uri = f"http://127.0.0.1:{port}/callback"
+
+    print(f"[1/5] Dynamic client registration at {REGISTRATION_ENDPOINT}", file=sys.stderr)
+    client_id = _register_client(redirect_uri)
+    print(f"      client_id: {client_id}", file=sys.stderr)
+
+    print("[2/5] Generating PKCE code_verifier + code_challenge", file=sys.stderr)
+    verifier, challenge = _pkce_pair()
+    state = secrets.token_urlsafe(32)
+
+    auth_params = urllib.parse.urlencode({
+        "response_type": "code",
+        "client_id": client_id,
+        "redirect_uri": redirect_uri,
+        "scope": SCOPE,
+        "state": state,
+        "code_challenge": challenge,
+        "code_challenge_method": "S256",
+    })
+    auth_url = f"{AUTHORIZATION_ENDPOINT}?{auth_params}"
+
+    print(f"[3/5] Starting local redirect handler on {redirect_uri}", file=sys.stderr)
+    httpd = http.server.HTTPServer(("127.0.0.1", port), _RedirectCatcher)
+    _RedirectCatcher.captured.clear()
+    t = threading.Thread(target=httpd.serve_forever, daemon=True)
+    t.start()
+
+    print("[4/5] Opening browser for Granola sign-in. If it doesn't open, visit:", file=sys.stderr)
+    print(f"      {auth_url}", file=sys.stderr)
+    webbrowser.open(auth_url)
+
+    # Wait for callback (5 min ceiling)
+    deadline = time.time() + 300
+    while time.time() < deadline:
+        if "code" in _RedirectCatcher.captured or "error" in _RedirectCatcher.captured:
+            break
+        time.sleep(0.5)
+    httpd.shutdown()
+
+    if "error" in _RedirectCatcher.captured:
+        print(f"FATAL: authorization failed — {_RedirectCatcher.captured}", file=sys.stderr)
+        return 1
+    if "code" not in _RedirectCatcher.captured:
+        print("FATAL: timed out waiting for authorization callback", file=sys.stderr)
+        return 1
+    if _RedirectCatcher.captured.get("state") != state:
+        print("FATAL: state mismatch — possible CSRF; bailing", file=sys.stderr)
+        return 1
+
+    code = _RedirectCatcher.captured["code"]
+    print("[5/5] Exchanging code for tokens", file=sys.stderr)
+    tokens = _exchange_code_for_tokens(code, client_id, verifier, redirect_uri)
+
+    now = time.time()
+    state_doc = {
+        "client_id": client_id,
+        "access_token": tokens["access_token"],
+        "refresh_token": tokens.get("refresh_token"),
+        "expires_at": now + tokens.get("expires_in", 3600),
+        "scope": tokens.get("scope", SCOPE),
+        "obtained_at": now,
+        "token_type": tokens.get("token_type", "Bearer"),
+    }
+    _save_state(state_doc)
+    print(f"      Tokens saved to {TOKEN_PATH} (mode 600)", file=sys.stderr)
+    print(f"      access_token expires in {tokens.get('expires_in', '?')}s", file=sys.stderr)
+    return 0
+
+
+def cmd_refresh() -> int:
+    state = _load_state()
+    if not state or "refresh_token" not in state:
+        print(f"No refresh_token at {TOKEN_PATH}; run `clio-granola-oauth auth` first", file=sys.stderr)
+        return 1
+    tokens = _refresh_tokens(state["refresh_token"], state["client_id"])
+    now = time.time()
+    state.update({
+        "access_token": tokens["access_token"],
+        "refresh_token": tokens.get("refresh_token", state["refresh_token"]),
+        "expires_at": now + tokens.get("expires_in", 3600),
+        "obtained_at": now,
+    })
+    _save_state(state)
+    print(f"Refreshed. access_token expires in {tokens.get('expires_in', '?')}s", file=sys.stderr)
+    return 0
+
+
+def get_access_token(refresh_within_seconds: int = 300) -> str:
+    """Public API for other scripts. Refreshes in place if needed."""
+    state = _load_state()
+    if not state:
+        raise RuntimeError(f"No Granola OAuth state at {TOKEN_PATH}; run `clio-granola-oauth auth`")
+    if state["expires_at"] - time.time() < refresh_within_seconds:
+        cmd_refresh()
+        state = _load_state()
+    return state["access_token"]
+
+
+def cmd_status() -> int:
+    state = _load_state()
+    if not state:
+        print(f"No state at {TOKEN_PATH} — run `clio-granola-oauth auth`")
+        return 1
+    remaining = state["expires_at"] - time.time()
+    print(f"client_id:     {state['client_id']}")
+    print(f"scope:         {state.get('scope')}")
+    print(f"access_token:  remaining {remaining/60:.1f} min (expires {time.ctime(state['expires_at'])})")
+    print(f"refresh_token: present ({len(state.get('refresh_token','') or '')} chars)")
+    print(f"obtained:      {time.ctime(state.get('obtained_at', 0))}")
+    return 0
+
+
+# -------------------------- MCP JSON-RPC -------------------------------------
+
+def _mcp_request(method: str, params: dict | None = None) -> dict:
+    token = get_access_token()
+    body = json.dumps({
+        "jsonrpc": "2.0",
+        "id": int(time.time() * 1000),
+        "method": method,
+        "params": params or {},
+    }).encode()
+    req = urllib.request.Request(
+        MCP_URL, data=body,
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+            "Accept": "application/json, text/event-stream",
+            "MCP-Protocol-Version": "2024-11-05",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            raw = r.read()
+    except urllib.error.HTTPError as e:
+        raise RuntimeError(f"MCP {e.code} on {method}: {e.read().decode()[:300]}") from None
+    # MCP servers can return JSON-RPC or SSE; sniff
+    text = raw.decode("utf-8", errors="replace")
+    if text.startswith("event:") or "\ndata: " in text:
+        for line in text.splitlines():
+            if line.startswith("data: "):
+                payload = json.loads(line[6:])
+                break
+        else:
+            raise RuntimeError(f"SSE response had no data line: {text[:200]}")
+    else:
+        payload = json.loads(text)
+    if "error" in payload:
+        raise RuntimeError(f"MCP error on {method}: {payload['error']}")
+    return payload.get("result", payload)
+
+
+def cmd_probe() -> int:
+    """Initialize + tools/list to introspect the MCP server."""
+    print("[1/2] initialize", file=sys.stderr)
+    init = _mcp_request("initialize", {
+        "protocolVersion": "2024-11-05",
+        "capabilities": {},
+        "clientInfo": {"name": "clio-router", "version": "0.1"},
+    })
+    print(json.dumps({"initialize": init}, indent=2))
+
+    print("[2/2] tools/list", file=sys.stderr)
+    tools = _mcp_request("tools/list", {})
+    print(json.dumps({"tools": tools}, indent=2))
+    return 0
+
+
+def cmd_call(tool_name: str, args_json: str) -> int:
+    args = json.loads(args_json) if args_json else {}
+    res = _mcp_request("tools/call", {"name": tool_name, "arguments": args})
+    print(json.dumps(res, indent=2))
+    return 0
+
+
+# -------------------------- argparse -----------------------------------------
+
+def main() -> int:
+    ap = argparse.ArgumentParser()
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    sub.add_parser("auth", help="Interactive OAuth — opens browser")
+    sub.add_parser("refresh", help="Refresh access_token from refresh_token")
+    sub.add_parser("status", help="Show token state (no refresh)")
+    sub.add_parser("probe", help="MCP initialize + tools/list")
+    p_call = sub.add_parser("call", help="MCP tools/call <name> <json-args>")
+    p_call.add_argument("tool")
+    p_call.add_argument("args", nargs="?", default="{}")
+    args = ap.parse_args()
+
+    if args.cmd == "auth":
+        return cmd_auth()
+    if args.cmd == "refresh":
+        return cmd_refresh()
+    if args.cmd == "status":
+        return cmd_status()
+    if args.cmd == "probe":
+        return cmd_probe()
+    if args.cmd == "call":
+        return cmd_call(args.tool, args.args)
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+: "${CLIO_MEETING_DIR:?CLIO_MEETING_DIR not set}"
+
+PID_FILE="$CLIO_MEETING_DIR/active.pid"
+SESSION_FILE="$CLIO_MEETING_DIR/active.session"
+
+if [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
+  echo "Active: $(cat "$SESSION_FILE" 2>/dev/null || echo '?') (pid $(cat "$PID_FILE"))"
+else
+  echo "No active recording."
+fi
+
+# Dep readiness check
+check() { command -v "$1" >/dev/null 2>&1 && echo "  [✓] $1" || echo "  [✗] $1"; }
+echo ""
+echo "Dependencies:"
+check ffmpeg
+check whisperx
+check obsidian
+check uv
+[ -n "${OP_SERVICE_ACCOUNT_TOKEN:-}" ] && echo "  [✓] OP_SERVICE_ACCOUNT_TOKEN set" || echo "  [✗] OP_SERVICE_ACCOUNT_TOKEN unset (AI/Homelab secrets unreachable)"
+[ -n "${ANTHROPIC_API_KEY:-}" ] && echo "  [✓] ANTHROPIC_API_KEY set" || echo "  [✗] ANTHROPIC_API_KEY unset"
+[ -n "${CLIO_MEETING_HF_TOKEN:-}" ] && echo "  [✓] CLIO_MEETING_HF_TOKEN set" || echo "  [✗] CLIO_MEETING_HF_TOKEN unset"
+
+if [ -d "$CLIO_MEETING_DIR/sessions" ]; then
+  echo ""
+  echo "Recent sessions:"
+  ls -1t "$CLIO_MEETING_DIR/sessions" 2>/dev/null | head -5 | sed 's/^/  /'
+fi
