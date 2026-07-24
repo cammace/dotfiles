@@ -68,6 +68,25 @@ fi
 # 1Password SSH agent (needed for git commit signing via op-ssh-sign)
 export SSH_AUTH_SOCK=~/Library/Group\ Containers/2BUA8C4S2C.com.1password/t/agent.sock
 
+# Self-heal evalcache: purge any cached init script that `source`s a file which
+# no longer exists (e.g. an old versioned Cellar path left behind by a brew
+# upgrade of pyenv/starship/etc). Runs before the _evalcache calls below so the
+# stale entry is rebuilt silently instead of erroring on every new shell.
+_evalcache_prune_stale() {
+  # NB: do NOT name a local `path` here — in zsh `path` is tied to $PATH, so
+  # assigning a filepath to it clobbers the command search path mid-loop and
+  # `rm` stops resolving, silently defeating the prune. Use `src` instead.
+  local f line src
+  for f in "$HOME/.zsh-evalcache/"*.sh(N); do
+    while IFS= read -r line; do
+      [[ $line == "source '"*"'" ]] || continue
+      src=${line#source \'}; src=${src%\'}
+      [[ -n $src && ! -e $src ]] && { rm -f "$f" "${f}.zwc"; break; }
+    done < "$f"
+  done
+}
+_evalcache_prune_stale
+
 # Python (pyenv) — cached for fast startup
 export PYENV_ROOT="$HOME/.pyenv"
 export PATH="$PYENV_ROOT/bin:$PATH"
@@ -101,14 +120,13 @@ claude() {
   fi
 }
 # alias clio="ssh -t dev-machine 'tmux new-session -A -s clio'"
-alias clio="cd ~/Documents/Clio && claude --dangerously-skip-permissions"
+alias clio="cd ~/Documents/Clio && cti_stamp && claude --dangerously-skip-permissions"
 alias refresh="source ~/.zshrc"
 # Clear evalcache (pyenv/jenv/starship/zoxide). Run after a `brew upgrade` if a
 # new shell errors with "no such file" pointing at an old versioned Cellar path.
 evalcache-clear() { rm -f "$HOME/.zsh-evalcache/"*.sh "$HOME/.zsh-evalcache/"*.zwc && echo "evalcache cleared — open a new shell to rebuild"; }
 alias zshconfig="code ~/.zshrc"
-alias h="ssh h"
-alias hermes="ssh h"
+alias hermes="ssh dev-machine"
 
 # eza (replaces ls)
 alias ls='eza --group-directories-first'
@@ -172,22 +190,35 @@ zle -N down-line-or-beginning-search
 bindkey '^[[A' up-line-or-beginning-search
 bindkey '^[[B' down-line-or-beginning-search
 
-# 1Password service account — read-only access to AI + Homelab vaults.
+# 1Password service-account token — read-only, AI + Homelab vaults only.
 # Token lives in macOS Keychain (unlocked at login, no biometric prompt).
+#
+# IMPORTANT: do NOT export OP_SERVICE_ACCOUNT_TOKEN globally. A global token
+# overrides the 1Password desktop-app integration, so a bare `op` would
+# authenticate as the service account and lose access to every other vault
+# (CHA, Private, Shared, …), failing with "vault not found". Resolve it on
+# demand instead (below). Headless/automated runs use ~/.local/bin/op-run,
+# which sources the token independently.
+#
 # To rotate: generate a new SA token at 1password.com/developer, then:
 #   security add-generic-password -U -s op-service-account -a homelab-ai -T /usr/bin/security \
 #     -w "$(op item get puelzwd65pdakekao3k2ejztom --fields credential --reveal --vault Private)"
-export OP_SERVICE_ACCOUNT_TOKEN="$(security find-generic-password -s op-service-account -a homelab-ai -w 2>/dev/null)"
+_op_sa_token() { security find-generic-password -s op-service-account -a homelab-ai -w 2>/dev/null; }
+
+# Run an op command as the service account (AI + Homelab, no biometric prompt).
+# Use for scripted/no-prompt reads; bare `op` uses your personal account (all vaults).
+op-sa() { OP_SERVICE_ACCOUNT_TOKEN="$(_op_sa_token)" op "$@"; }
 
 # AI API keys — LAZY-loaded on demand. Each `op read` is a ~0.5s network call;
 # fetching all three at every shell start cost ~1.4s. They're rarely needed
 # interactively, so populate on demand with `load-ai-keys` (no on-disk cache).
 # Homelab secrets (Unifi, HA, etc.) are NOT exported; scripts call `op read` inline.
 load-ai-keys() {
-    [[ -n "$OP_SERVICE_ACCOUNT_TOKEN" ]] || { print -u2 "load-ai-keys: no OP_SERVICE_ACCOUNT_TOKEN"; return 1; }
-    [[ -n "$OPENAI_API_KEY"    ]] || export OPENAI_API_KEY="$(op read 'op://AI/Open AI API Key/api key' 2>/dev/null)"
-    [[ -n "$ANTHROPIC_API_KEY" ]] || export ANTHROPIC_API_KEY="$(op read 'op://AI/Anthropic API Key/api key' 2>/dev/null)"
-    [[ -n "$GEMINI_API_KEY"    ]] || export GEMINI_API_KEY="$(op read 'op://AI/Gemini API Key/api key' 2>/dev/null)"
+    local tok; tok="$(_op_sa_token)"
+    [[ -n "$tok" ]] || { print -u2 "load-ai-keys: no service-account token in Keychain"; return 1; }
+    [[ -n "$OPENAI_API_KEY"    ]] || export OPENAI_API_KEY="$(OP_SERVICE_ACCOUNT_TOKEN="$tok" op read 'op://AI/Open AI API Key/api key' 2>/dev/null)"
+    [[ -n "$ANTHROPIC_API_KEY" ]] || export ANTHROPIC_API_KEY="$(OP_SERVICE_ACCOUNT_TOKEN="$tok" op read 'op://AI/Anthropic API Key/api key' 2>/dev/null)"
+    [[ -n "$GEMINI_API_KEY"    ]] || export GEMINI_API_KEY="$(OP_SERVICE_ACCOUNT_TOKEN="$tok" op read 'op://AI/Gemini API Key/api key' 2>/dev/null)"
 }
 # Note: `td` (Todoist CLI) reads its token from the macOS Keychain, not env/1Password.
 # Source of truth is op://AI/Todoist API Key/api key. Re-provision on a new machine:
@@ -219,6 +250,9 @@ alias sessions="~/tmux_picker.sh"
 export _ZO_DOCTOR=0
 _evalcache zoxide init --cmd cd zsh
 
+# iTerm2 per-tab identity for Claude Code sessions (color/badge/title by repo)
+[[ -f "$HOME/.config/zsh/claude-tab-identity.zsh" ]] && source "$HOME/.config/zsh/claude-tab-identity.zsh"
+
 # # OpenClaw Completion
 # source "/Users/cameron/.openclaw/completions/openclaw.zsh"
 
@@ -229,3 +263,5 @@ export PATH=/Users/cameron/.opencode/bin:$PATH
 [ -f "$HOME/.clio/env" ] && source "$HOME/.clio/env"
 
 export GOOGLE_SERVICE_ACCOUNT_KEY="$HOME/.config/commhospital/sa-key.json"
+# Hermes Agent — ensure ~/.local/bin is on PATH
+export PATH="$HOME/.local/bin:$PATH"
