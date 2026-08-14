@@ -66,4 +66,4 @@ Session tasks vanish at session end, so anything the user owns must land somewhe
 - Code work goes to GitHub issues, and only for a real code change.
 - Don't invent a local file to hold it. If no tracker is obvious, name the item and ask.
 
-<!-- Machine-local routing (Todoist lanes, vault surfaces) lives in ~/.claude/rules/, which is untracked. -->
+<!-- Machine-local routing (which tracker, which personal surfaces) lives in ~/.claude/rules/, untracked. -->
