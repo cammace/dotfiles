@@ -24,8 +24,17 @@ config config --local status.showUntrackedFiles no
 | `Brewfile` | Homebrew packages, casks, and App Store apps |
 | `tmux_picker.sh` | Interactive Nord-themed tmux session picker |
 | `update_ha_power.sh` | Cron script reporting MacBook power draw to Home Assistant |
-| `CLAUDE.md` | Claude Code project instructions |
+| `.claude/CLAUDE.md` | Claude Code instructions: response style (concise, skimmable) + work-tracking rules |
 | `.claude/hooks/codex-pr-review-gate.sh` | PreToolUse gate: runs a Codex adversarial review before `gh pr create` / `git push` to a branch with an open PR |
+
+## Claude Code
+
+`.claude/CLAUDE.md` is loaded into every Claude Code session on the machine, in every directory. It holds two
+things: response-style rules (answer first, no tool-call narration, no re-explaining a visible diff, ASD-STE100
+sentence mechanics) and rules for when to open a task list.
+
+Machine-local routing (which task tracker, which personal surfaces) lives in `~/.claude/rules/`, which is
+deliberately untracked.
 
 ## Theme
 
