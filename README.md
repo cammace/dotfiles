@@ -25,6 +25,7 @@ config config --local status.showUntrackedFiles no
 | `tmux_picker.sh` | Interactive Nord-themed tmux session picker |
 | `update_ha_power.sh` | Cron script reporting MacBook power draw to Home Assistant |
 | `CLAUDE.md` | Claude Code project instructions |
+| `.claude/hooks/codex-pr-review-gate.sh` | PreToolUse gate: runs a Codex adversarial review before `gh pr create` / `git push` to a branch with an open PR |
 
 ## Theme
 

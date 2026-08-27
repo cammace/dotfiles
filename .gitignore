@@ -22,6 +22,8 @@
 # Claude Code
 !.claude/
 !.claude/CLAUDE.md
+!.claude/hooks/
+!.claude/hooks/*.sh
 
 # Homebrew
 !Brewfile
