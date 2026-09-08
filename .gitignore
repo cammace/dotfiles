@@ -25,6 +25,10 @@
 !.claude/hooks/
 !.claude/hooks/*.sh
 
+# iTerm2
+!.iterm2/
+!.iterm2/semantic-open.sh
+
 # Homebrew
 !Brewfile
 
