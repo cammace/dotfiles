@@ -88,14 +88,29 @@ _evalcache_prune_stale() {
 _evalcache_prune_stale
 
 # Python (pyenv) — cached for fast startup
+# `pyenv init --path` was dropped 2026-09-22: pyenv's README says it "only does
+# items 2 and 4" of what `pyenv init -` does, so in an interactive zsh the two
+# lines overlapped and the extra one cost ~75 ms per shell. If `which python`
+# ever stops resolving to a pyenv shim in a fresh tab, put it back.
 export PYENV_ROOT="$HOME/.pyenv"
 export PATH="$PYENV_ROOT/bin:$PATH"
-_evalcache pyenv init --path
 _evalcache pyenv init -
 
 # Java (jenv) — cached for fast startup
 export PATH="$HOME/.jenv/bin:$PATH"
 _evalcache jenv init -
+
+# jenv's export plugin registers _jenv_export_hook in precmd, so EVERY prompt
+# spawned `jenv javahome` — 50 ms measured 2026-09-22. JAVA_HOME only changes
+# when .java-version does, so move the hook to chpwd: same behaviour, ~50x fewer
+# calls. The plugin runs the hook once at init, so the starting directory is
+# already covered. Caveat: `jenv shell <ver>` won't refresh JAVA_HOME until you
+# cd — run `_jenv_export_hook` by hand if you use it. Note jenv's shims put the
+# right `java` on PATH per directory regardless; JAVA_HOME only steers tools that
+# read it directly, such as the Gradle launcher JVM.
+autoload -Uz add-zsh-hook
+add-zsh-hook -d precmd _jenv_export_hook
+add-zsh-hook chpwd _jenv_export_hook
 
 # iTerm2 Integration
 [[ -f "$HOME/.iterm2_shell_integration.zsh" ]] && source "$HOME/.iterm2_shell_integration.zsh"
@@ -220,9 +235,11 @@ load-ai-keys() {
     [[ -n "$ANTHROPIC_API_KEY" ]] || export ANTHROPIC_API_KEY="$(OP_SERVICE_ACCOUNT_TOKEN="$tok" op read 'op://AI/Anthropic API Key/api key' 2>/dev/null)"
     [[ -n "$GEMINI_API_KEY"    ]] || export GEMINI_API_KEY="$(OP_SERVICE_ACCOUNT_TOKEN="$tok" op read 'op://AI/Gemini API Key/api key' 2>/dev/null)"
 }
-# Note: `td` (Todoist CLI) reads its token from the macOS Keychain, not env/1Password.
-# Source of truth is op://AI/Todoist API Key/api key. Re-provision on a new machine:
-#   td auth token "$(op read 'op://AI/Todoist API Key/api key')"
+# Todoist was RETIRED 2026-08-31 — TaskNotes is the only authoritative task store.
+# Do NOT re-provision `td`. The CLI still runs and the account still answers with
+# ~300 stale pre-migration tasks, so it returns plausible rows from a dead store
+# instead of failing loudly. The old key lives at op://AI/Todoist API Key if it is
+# ever needed to decommission the account.
 
 export PAGER=cat
 export GH_PAGER=cat
@@ -258,6 +275,7 @@ _evalcache zoxide init --cmd cd zsh
 
 # opencode
 export PATH=/Users/cameron/.opencode/bin:$PATH
+alias opencode='~/.config/opencode/launch.sh --auto'
 
 # Clio env (managed by setup/bootstrap.sh — safe to remove)
 [ -f "$HOME/.clio/env" ] && source "$HOME/.clio/env"
