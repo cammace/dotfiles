@@ -146,7 +146,22 @@ def render(reports):
     return "\n".join(lines)
 
 
+# The one session that is SUPPOSED to end on an unpushed commit. The homelab
+# operator's judge (`~/Developer/homelab/operator/run-operator.sh`) runs
+# `claude -p` with ssh shimmed out and `operator/prompt.md` telling it in so
+# many words: "Do NOT push - you have no ssh, by design; the wrapper pushes
+# after you exit." Without this exemption the hook blocks that stop and feeds
+# the judge an instruction contradicting its own prompt; its only way to comply
+# routes through the shimmed ssh and fails, burning a turn of an unattended run
+# nobody is watching. Added 2026-09-22, before it ever fired - the judge had
+# been blind since 08-26, so its last commit predates this hook.
+OPERATOR_ENV = "HOMELAB_OPERATOR_JUDGE"
+
+
 def main():
+    if os.environ.get(OPERATOR_ENV) == "1":
+        sys.exit(0)
+
     try:
         payload = json.load(sys.stdin)
     except (json.JSONDecodeError, ValueError):
