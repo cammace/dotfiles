@@ -44,25 +44,28 @@ Mechanics of ASD-STE100 Simplified Technical English:
 
 Route by who does the work, not by how the list looks.
 
-## Work Claude does this session -> TaskCreate
+## Work Claude does this session -> session tracking
 
-Session-scoped. The list dies with the session, so it tracks execution and nothing else.
+Session-scoped. It tracks execution and nothing else, and it dies with the session.
 
-- Open the list before starting when a request needs 3+ distinct steps or spans multiple files or systems. Not after.
-- Mark `in_progress` before the step, `completed` after. One task in progress at a time.
+- When a request needs 3+ distinct steps or spans multiple files or systems, state the step plan in one
+  line before starting. Not after.
+- Where the model offers the task-tracking tools (`TaskCreate` etc.), use them: `in_progress` before the
+  step, `completed` after, one in progress at a time. Newer models do not offer them; there the plan line
+  and the closing report are the whole mechanism.
 - Add newly discovered steps as you go rather than doing them silently.
-- Leave a task open if it is partly done, blocked, or its tests fail. Never close on a hopeful guess.
+- Report what stayed open - partly done, blocked, tests failing. Never close on a hopeful guess.
 
-Do NOT open a list for: advisory or informational answers (recommendations the user is evaluating are not
-work Claude is doing); work finishing in the next call or two; anything where the list would be most of the
-output. A task list is scaffolding for real work, never a way to look organized, and never the preamble
+No plan line for: advisory or informational answers (recommendations the user is evaluating are not
+work Claude is doing); work finishing in the next call or two; anything where the plan would be most of
+the output. Tracking is scaffolding for real work, never a way to look organized, and never the preamble
 banned above.
 
-## Work the user does later -> never TaskCreate
+## Work the user does later -> never session tracking
 
-Session tasks vanish at session end, so anything the user owns must land somewhere durable.
+Session tracking vanishes at session end, so anything the user owns must land somewhere durable.
 
-- Surface the item, then route it to a durable tracker. Never let it sit only in the session task list.
+- Surface the item, then route it to a durable tracker. Never let it sit only in session tracking.
 - Code work goes to GitHub issues, and only for a real code change.
 - Don't invent a local file to hold it. If no tracker is obvious, name the item and ask.
 
