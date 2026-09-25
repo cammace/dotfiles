@@ -31,6 +31,7 @@
 # iTerm2
 !.iterm2/
 !.iterm2/semantic-open.sh
+!.iterm2/gh-ref-open.sh
 
 # Homebrew
 !Brewfile
