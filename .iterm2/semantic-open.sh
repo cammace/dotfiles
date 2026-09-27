@@ -7,6 +7,10 @@
 # the wikilinks, backlinks and graph, so for a vault note it is the correct one.
 # Everything outside the vault keeps the old routing.
 #
+# 2026-09-27: vault-relative paths (Attachments/x.pdf) resolve against the vault
+# and repo roots, the fallback is the macOS default app instead of Chrome, and
+# the lowercase step works under /bin/bash 3.2.
+#
 # Set SEMANTIC_OPEN_DRYRUN=1 to print the action instead of performing it.
 
 FILE="$1"
@@ -34,13 +38,46 @@ print(os.path.realpath(os.path.abspath(sys.argv[1])))
 PY
 }
 
-RESOLVED="$(resolve "$FILE")"
-[[ -z "$RESOLVED" ]] && RESOLVED="$FILE"
 VAULT_RESOLVED="$(resolve "$VAULT_ROOT")"
 [[ -z "$VAULT_RESOLVED" ]] && VAULT_RESOLVED="$VAULT_ROOT"
 
+# "Always run command" hands over the raw clicked text when iTerm2 could not
+# find the file itself - typically a vault-relative path like
+# Attachments/house/x.pdf printed by a session whose cwd is the repo root.
+# Strip wrapping punctuation, then try each root in turn.
+FILE="${FILE#[\`\'\"(<]}"
+FILE="${FILE%[\`\'\",.;)>]}"
+FILE="${FILE/#\~/$HOME}"
+if [[ -z "$LINE" && "$FILE" =~ ^(.+):([0-9]+)$ ]]; then
+  FILE="${BASH_REMATCH[1]}"
+  LINE="${BASH_REMATCH[2]}"
+fi
+
+RESOLVED=""
+if [[ "$FILE" == /* ]]; then
+  [[ -e "$FILE" ]] && RESOLVED="$(resolve "$FILE")"
+else
+  for root in "$PWD" "$VAULT_ROOT" "${VAULT_ROOT%/notebook}"; do
+    if [[ -e "$root/$FILE" ]]; then
+      RESOLVED="$(resolve "$root/$FILE")"
+      break
+    fi
+  done
+fi
+
+if [[ -z "$RESOLVED" ]]; then
+  # Not a file anywhere we know. A real URL still opens; anything else is a
+  # no-op, never a bogus file:// or http:// guess in Chrome.
+  if [[ "$FILE" =~ ^[a-zA-Z][a-zA-Z0-9+.-]*:// ]]; then
+    run open "$FILE"
+    exit 0
+  fi
+  echo "semantic-open: not found: $FILE" >&2
+  exit 1
+fi
+
 ext="${RESOLVED##*.}"
-ext="${ext,,}" # lowercase
+ext="$(printf '%s' "$ext" | tr '[:upper:]' '[:lower:]')" # bash 3.2 has no ${x,,}
 
 # --- Obsidian: a vault-native file inside the vault ---------------------------
 in_vault=0
@@ -102,8 +139,8 @@ case "$ext" in
     run open -a "Preview" "$RESOLVED"
     ;;
 
-  # Fallback → Chrome
+  # Fallback → the macOS default app for the extension (PDF → Preview, etc.)
   *)
-    run open -a "Google Chrome" "$RESOLVED"
+    run open "$RESOLVED"
     ;;
 esac
