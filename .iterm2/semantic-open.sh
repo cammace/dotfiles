@@ -48,6 +48,7 @@ VAULT_RESOLVED="$(resolve "$VAULT_ROOT")"
 FILE="${FILE#[\`\'\"(<]}"
 FILE="${FILE%[\`\'\",.;)>]}"
 FILE="${FILE/#\~/$HOME}"
+RAW="$FILE" # pre-split, so localhost:3000 keeps its port below
 if [[ -z "$LINE" && "$FILE" =~ ^(.+):([0-9]+)$ ]]; then
   FILE="${BASH_REMATCH[1]}"
   LINE="${BASH_REMATCH[2]}"
@@ -66,14 +67,27 @@ else
 fi
 
 if [[ -z "$RESOLVED" ]]; then
-  # Not a file anywhere we know. A real URL still opens; anything else is a
-  # no-op, never a bogus file:// or http:// guess in Chrome.
-  if [[ "$FILE" =~ ^[a-zA-Z][a-zA-Z0-9+.-]*:// ]]; then
+  # Not a file anywhere we know. iTerm2 runs this any-string step BEFORE its
+  # own URL detection (iTermURLActionFactory phase order), so plain-text URLs,
+  # emails and hosts land here too - open them via their default handler
+  # (http/https -> Chrome). Anything else is a no-op, never a bogus
+  # file:// or http://Attachments/... guess.
+  FILE="$RAW"
+  if [[ "$FILE" =~ ^(localhost|127\.0\.0\.1)(:[0-9]+)?(/.*)?$ ]]; then
+    run open "http://$FILE"
+  elif [[ "$FILE" =~ ^[a-zA-Z][a-zA-Z0-9+.-]*:// || "$FILE" =~ ^(mailto|tel):. ]]; then
     run open "$FILE"
-    exit 0
+  elif [[ "$FILE" =~ ^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$ ]]; then
+    run open "mailto:$FILE"
+  elif [[ "$FILE" =~ ^(www\.)?[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)*\.(com|org|net|io|dev|ai|app|co|gov|edu|us)(/.*)?$ ]]; then
+    # Scheme-less host (github.com/x, www.foo.org). TLD list is closed on
+    # purpose: README.md or notes.txt must never become a web lookup.
+    run open "https://$FILE"
+  else
+    echo "semantic-open: not found: $FILE" >&2
+    exit 1
   fi
-  echo "semantic-open: not found: $FILE" >&2
-  exit 1
+  exit 0
 fi
 
 ext="${RESOLVED##*.}"
