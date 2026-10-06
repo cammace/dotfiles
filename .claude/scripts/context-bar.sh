@@ -25,6 +25,38 @@ input=$(cat)
 
 # Extract model, directory, and cwd
 model=$(echo "$input" | jq -r '.model.display_name // .model.id // "?"')
+effort=$(echo "$input" | jq -r '.effort.level // empty')   # live, follows /effort (2026-10-06)
+
+# Slow lookups (gh, status.claude.com) never run inline: the footer reads a cache file and,
+# when it is older than its TTL, refreshes it in a detached background job. ~10 tabs share
+# one cache per key, and a .lock file keeps them from refreshing it all at once.
+CACHE_DIR="$HOME/.cache/context-bar"
+mkdir -p "$CACHE_DIR" 2>/dev/null
+cached() {   # cached <key> <ttl-seconds> <command...>  -> prints the cached output (may be stale)
+    local key="$1" ttl="$2"; shift 2
+    local f="$CACHE_DIR/$key" lock="$CACHE_DIR/$key.lock" now age
+    now=$(date +%s)
+    age=$(( now - $(stat -f %m "$f" 2>/dev/null || echo 0) ))
+    if (( age > ttl )) && ! [[ -f "$lock" && $(( now - $(stat -f %m "$lock" 2>/dev/null || echo 0) )) -lt 60 ]]; then
+        touch "$lock"
+        ( "$@" > "$f.tmp" 2>/dev/null; mv -f "$f.tmp" "$f"; rm -f "$lock" ) </dev/null >/dev/null 2>&1 &
+        disown 2>/dev/null
+    fi
+    cat "$f" 2>/dev/null
+}
+pr_ci() {    # "#N ✓" / "#N ✗2" / "#N ●" for the branch's open PR; empty when none
+    cd "$1" && gh pr view --json number,state,isDraft,statusCheckRollup --jq '
+        select(.state == "OPEN") |
+        [.statusCheckRollup[] | (.conclusion // .state // "") | ascii_upcase] as $c |
+        ($c | map(select(. == "FAILURE" or . == "ERROR" or . == "CANCELLED" or . == "TIMED_OUT" or . == "ACTION_REQUIRED")) | length) as $bad |
+        ($c | map(select(. == "" or . == "PENDING" or . == "EXPECTED" or . == "IN_PROGRESS" or . == "QUEUED")) | length) as $wait |
+        "#\(.number)" + (if .isDraft then " draft" else "" end)
+        + (if $bad > 0 then " ✗\($bad)" elif $wait > 0 then " ●" elif ($c | length) > 0 then " ✓" else "" end)'
+}
+claude_status() {   # status.claude.com: prints nothing while operational
+    curl -s --max-time 3 https://status.claude.com/api/v2/status.json \
+        | jq -r 'select(.status.indicator != "none") | "🔴 Claude: \(.status.description)"'
+}
 cwd=$(echo "$input" | jq -r '.cwd // empty')
 dir=$(basename "$cwd" 2>/dev/null || echo "?")
 
@@ -81,16 +113,12 @@ if [[ -n "$cwd" && -d "$cwd" ]]; then
             sync_status="no upstream"
         fi
 
-        # Build git status string
-        if [[ "$file_count" -eq 0 ]]; then
-            git_status="(0 files uncommitted, ${sync_status})"
-        elif [[ "$file_count" -eq 1 ]]; then
-            # Show the actual filename when only one file is uncommitted
-            single_file=$(git -C "$cwd" --no-optional-locks status --porcelain -uno 2>/dev/null | head -1 | sed 's/^...//')
-            git_status="(${single_file} uncommitted, ${sync_status})"
-        else
-            git_status="(${file_count} files uncommitted, ${sync_status})"
-        fi
+        # Compact git status (2026-10-05): ±uncommitted ↑ahead ↓behind, nothing when clean and synced
+        git_status=""
+        [[ "$file_count" -gt 0 ]] && git_status="±${file_count}"
+        [[ -n "$upstream" && "${ahead:-0}" -gt 0 ]] && git_status+="${git_status:+ }↑${ahead}"
+        [[ -n "$upstream" && "${behind:-0}" -gt 0 ]] && git_status+="${git_status:+ }↓${behind}"
+        [[ -z "$upstream" ]] && git_status+="${git_status:+ }no upstream"
     fi
 fi
 
@@ -149,7 +177,7 @@ if [[ -n "$transcript_path" && -f "$transcript_path" ]]; then
         fi
     done
 
-    ctx="${bar} ${C_GRAY}${pct_prefix}${pct}% of ${max_display} tokens"
+    ctx="${bar} ${C_GRAY}${pct_prefix}${pct}%"
 else
     # Transcript not available yet - show baseline estimate
     baseline=20000
@@ -170,15 +198,22 @@ else
         fi
     done
 
-    ctx="${bar} ${C_GRAY}~${pct}% of ${max_display} tokens"
+    ctx="${bar} ${C_GRAY}~${pct}%"
 fi
 
 # Build output: Model | Dir | Branch (uncommitted) | Context
-output="${C_ACCENT}${model}${C_GRAY} | 📁 ${dir}"
-[[ -n "$branch" ]] && output+=" | 🔀 ${branch} ${git_status}"
-output+=" | ${ctx}${C_RESET}"
+output="${C_ACCENT}${model}${effort:+ ${C_GRAY}${effort}}${C_GRAY} · ${dir}"
+[[ -n "$branch" ]] && output+=" · ${branch}${git_status:+ ${git_status}}"
+# PR + CI for a feature branch (no lookup on main/master): cached 2 min per repo+branch
+if [[ -n "$branch" && "$branch" != "main" && "$branch" != "master" ]]; then
+    pr_key="pr-$(printf '%s' "$cwd@$branch" | md5 -q)"
+    pr=$(cached "$pr_key" 120 pr_ci "$cwd")
+    [[ -n "$pr" ]] && output+=" · ${pr}"
+fi
+output+=" · ${ctx}${C_RESET}"
+outage=$(cached claude-status 300 claude_status)
+[[ -n "$outage" ]] && output+=" ${C_ACCENT}·${C_RESET} \033[38;5;167m${outage}${C_RESET}"
 
-printf '%b\n' "$output"
 
 # Session label: explicit $CLAUDE_TAB_LABEL (set by `cct "label"`), else the session
 # name Claude Code carries (`/rename`, `--name`, or the Clio session-registry hook's
@@ -206,41 +241,50 @@ if [[ -z "$session_label" && -n "$transcript_path" && -f "$transcript_path" ]]; 
     fi
 fi
 if [[ -n "$session_label" ]]; then
-    [[ ${#session_label} -gt 70 ]] && session_label="${session_label:0:67}..."
-    printf '%b\n' "${C_GRAY}🎯 ${C_ACCENT}${session_label}${C_RESET}"
+    [[ ${#session_label} -gt 40 ]] && session_label="${session_label:0:37}..."
+    output+="${C_GRAY} · 🎯 ${C_ACCENT}${session_label}${C_RESET}"
+fi
+printf '%b\n' "$output"
+
+# Day plan from the Clio conductor (2026-10-04): lib/conductor.py writes footer.json on
+# every tick; shown only while it is under 90 minutes old, so a stopped conductor drops out.
+footer_json="$HOME/.clio/state/conductor/footer.json"
+if [[ -f "$footer_json" ]]; then
+    plan_line=$(jq -r --arg cut "$(date -v-90M +%Y-%m-%dT%H:%M)" '
+        def dur(m): if m < 60 then "\(m) min" elif m % 60 == 0 then "\(m / 60 | floor) h"
+                    else "\(m / 60 | floor) h \(m % 60) min" end;
+        select(.at >= $cut) |
+        (if .now then "Now: " + (.now | if length > 40 then .[0:38] + "…" else . end) else "Plan clear" end)
+        + " \(.done)/\(.planned)"
+        + (if (.left_min // 0) > 0 then " · \(dur(.left_min))" else "" end)
+    ' "$footer_json" 2>/dev/null)
 fi
 
-# Get user's last message (text only, not tool results, skip unhelpful messages)
-if [[ -n "$transcript_path" && -f "$transcript_path" ]]; then
-    # Calculate visible length (without ANSI codes) - 10 chars for bar + content
-    plain_output="${model} | 📁${dir}"
-    [[ -n "$branch" ]] && plain_output+=" | 🔀${branch} ${git_status}"
-    plain_output+=" | xxxxxxxxxx ${pct}% of ${max_display} tokens"
-    max_len=${#plain_output}
-    last_user_msg=$(jq -rs '
-        # Messages to skip (not useful as context)
-        def is_unhelpful:
-            startswith("[Request interrupted") or
-            startswith("[Request cancelled") or
-            . == "";
-
-        [.[] | select(.type == "user") |
-         select(.message.content | type == "string" or
-                (type == "array" and any(.[]; .type == "text")))] |
-        reverse |
-        map(.message.content |
-            if type == "string" then .
-            else [.[] | select(.type == "text") | .text] | join(" ") end |
-            gsub("\n"; " ") | gsub("  +"; " ")) |
-        map(select(is_unhelpful | not)) |
-        first // ""
-    ' < "$transcript_path" 2>/dev/null)
-
-    if [[ -n "$last_user_msg" ]]; then
-        if [[ ${#last_user_msg} -gt $max_len ]]; then
-            echo "💬 ${last_user_msg:0:$((max_len - 3))}..."
-        else
-            echo "💬 ${last_user_msg}"
-        fi
+# Clio counts (2026-10-05, replacing the clio-state-band mod): only in the Clio repo, and only
+# a count worth acting on - Inbox over 10 (the triage rule), open CAM flags, live peer sessions.
+clio_bits=""
+repo_root=$(git -C "$cwd" rev-parse --show-toplevel 2>/dev/null)
+if [[ -n "$repo_root" && -f "$repo_root/notebook/Inbox.md" ]]; then
+    inbox_n=$(awk 'f && /^- /{c++} /^---$/{f=1} END{print c+0}' "$repo_root/notebook/Inbox.md" 2>/dev/null)
+    [[ "${inbox_n:-0}" -gt 10 ]] && clio_bits+=" · 📥 ${inbox_n}"
+    if [[ -f "$repo_root/queue/cam-flags.md" ]]; then
+        flags_n=$(head -1 "$repo_root/queue/cam-flags.md" | sed -n 's/.*(open: \([0-9]*\)).*/\1/p')
+        [[ "${flags_n:-0}" -gt 0 ]] && clio_bits+=" · 🚩 ${flags_n}"
     fi
+    own_sid=$(echo "$input" | jq -r '.session_id // empty')
+    peers_n=0
+    for f in "$HOME"/.clio/state/sessions/*.json; do
+        [[ -e "$f" ]] || continue
+        IFS=$'\t' read -r p_sid p_pid p_cwd < <(jq -r '[.session_id // "", .pid // "", .cwd // ""] | @tsv' "$f" 2>/dev/null)
+        [[ -z "$p_pid" || "$p_sid" == "$own_sid" || "$p_cwd" != "$repo_root" ]] && continue
+        reg="$HOME/.claude/sessions/${p_pid}.json"
+        [[ -f "$reg" ]] && [[ $(jq -r --arg s "$p_sid" 'if .sessionId == $s and .kind == "interactive" then 1 else 0 end' "$reg" 2>/dev/null) == 1 ]] \
+            && peers_n=$((peers_n + 1))
+    done
+    [[ "$peers_n" -gt 0 ]] && clio_bits+=" · 👥 ${peers_n}"
+fi
+if [[ -n "$plan_line" || -n "$clio_bits" ]]; then
+    line2="${plan_line:-}${clio_bits}"
+    line2="${line2# · }"
+    printf '%b\n' "${C_GRAY}📋 ${C_ACCENT}${line2}${C_RESET}"
 fi
