@@ -122,84 +122,41 @@ if [[ -n "$cwd" && -d "$cwd" ]]; then
     fi
 fi
 
-# Get transcript path for context calculation and last message feature
+# Get transcript path for the session-label fallback below
 transcript_path=$(echo "$input" | jq -r '.transcript_path // empty')
 
-# Get context window size from JSON (accurate), but calculate tokens from transcript
-# (more accurate than total_input_tokens which excludes system prompt/tools/memory)
-# See: github.com/anthropics/claude-code/issues/13652
+# Context: Claude Code's own used_percentage (2026-10-06; input + cache tokens of the last
+# API response, the same sum the old transcript scan made). It is null before the first
+# response and right after /compact; then show the ~20k baseline estimate (system prompt,
+# tools, memory, env block) with a "~".
 max_context=$(echo "$input" | jq -r '.context_window.context_window_size // 200000')
-max_k=$((max_context / 1000))
-if [[ $max_k -ge 1000 ]]; then
-    max_display="$((max_k / 1000))M"
-else
-    max_display="${max_k}k"
+pct=$(echo "$input" | jq -r '.context_window.used_percentage // empty | floor')
+pct_prefix=""
+if [[ -z "$pct" ]]; then
+    pct=$((20000 * 100 / max_context))
+    pct_prefix="~"
 fi
-
-# Calculate context bar from transcript
-if [[ -n "$transcript_path" && -f "$transcript_path" ]]; then
-    context_length=$(jq -s '
-        map(select(.message.usage and .isSidechain != true and .isApiErrorMessage != true)) |
-        last |
-        if . then
-            (.message.usage.input_tokens // 0) +
-            (.message.usage.cache_read_input_tokens // 0) +
-            (.message.usage.cache_creation_input_tokens // 0)
-        else 0 end
-    ' < "$transcript_path")
-
-    # 20k baseline: includes system prompt (~3k), tools (~15k), memory (~300),
-    # plus ~2k for git status, env block, XML framing, and other dynamic context
-    baseline=20000
-    bar_width=10
-
-    if [[ "$context_length" -gt 0 ]]; then
-        pct=$((context_length * 100 / max_context))
-        pct_prefix=""
+[[ $pct -gt 100 ]] && pct=100
+bar=""
+for ((i=0; i<10; i++)); do
+    progress=$((pct - i * 10))
+    if [[ $progress -ge 8 ]]; then
+        bar+="${C_ACCENT}█${C_RESET}"
+    elif [[ $progress -ge 3 ]]; then
+        bar+="${C_ACCENT}▄${C_RESET}"
     else
-        # At conversation start, ~20k baseline is already loaded
-        pct=$((baseline * 100 / max_context))
-        pct_prefix="~"
+        bar+="${C_BAR_EMPTY}░${C_RESET}"
     fi
+done
+ctx="${bar} ${C_GRAY}${pct_prefix}${pct}%"
 
-    [[ $pct -gt 100 ]] && pct=100
-
-    bar=""
-    for ((i=0; i<bar_width; i++)); do
-        bar_start=$((i * 10))
-        progress=$((pct - bar_start))
-        if [[ $progress -ge 8 ]]; then
-            bar+="${C_ACCENT}█${C_RESET}"
-        elif [[ $progress -ge 3 ]]; then
-            bar+="${C_ACCENT}▄${C_RESET}"
-        else
-            bar+="${C_BAR_EMPTY}░${C_RESET}"
-        fi
-    done
-
-    ctx="${bar} ${C_GRAY}${pct_prefix}${pct}%"
-else
-    # Transcript not available yet - show baseline estimate
-    baseline=20000
-    bar_width=10
-    pct=$((baseline * 100 / max_context))
-    [[ $pct -gt 100 ]] && pct=100
-
-    bar=""
-    for ((i=0; i<bar_width; i++)); do
-        bar_start=$((i * 10))
-        progress=$((pct - bar_start))
-        if [[ $progress -ge 8 ]]; then
-            bar+="${C_ACCENT}█${C_RESET}"
-        elif [[ $progress -ge 3 ]]; then
-            bar+="${C_ACCENT}▄${C_RESET}"
-        else
-            bar+="${C_BAR_EMPTY}░${C_RESET}"
-        fi
-    done
-
-    ctx="${bar} ${C_GRAY}~${pct}%"
-fi
+# Memory pressure (2026-10-06): ~10 sessions on a 16 GB Mac. Kernel level 1 = normal,
+# 2 = warn, 4 = critical; shown only above normal.
+case "$(sysctl -n kern.memorystatus_vm_pressure_level 2>/dev/null)" in
+    2) ram="🧠 RAM warn" ;;
+    4) ram="🧠 RAM critical" ;;
+    *) ram="" ;;
+esac
 
 # Build output: Model | Dir | Branch (uncommitted) | Context
 output="${C_ACCENT}${model}${effort:+ ${C_GRAY}${effort}}${C_GRAY} · ${dir}"
@@ -213,6 +170,7 @@ fi
 output+=" · ${ctx}${C_RESET}"
 outage=$(cached claude-status 300 claude_status)
 [[ -n "$outage" ]] && output+=" ${C_ACCENT}·${C_RESET} \033[38;5;167m${outage}${C_RESET}"
+[[ -n "$ram" ]] && output+=" ${C_GRAY}·${C_RESET} \033[38;5;167m${ram}${C_RESET}"
 
 
 # Session label: explicit $CLAUDE_TAB_LABEL (set by `cct "label"`), else the session
