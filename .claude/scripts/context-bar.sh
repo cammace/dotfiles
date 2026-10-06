@@ -158,28 +158,35 @@ case "$(sysctl -n kern.memorystatus_vm_pressure_level 2>/dev/null)" in
     *) ram="" ;;
 esac
 
-# Build output: Model | Dir | Branch (uncommitted) | Context
-output="${C_ACCENT}${model}${effort:+ ${C_GRAY}${effort}}${C_GRAY} · ${dir}"
-[[ -n "$branch" ]] && output+=" · ${branch}${git_status:+ ${git_status}}"
+# Layout (2026-10-06): each row is LEFT<TAB>RIGHT, right-aligned to $COLUMNS (Claude Code sets
+# it for the script; tput cannot see the terminal) by statusline-align.py, which counts emoji
+# as 2 cells and cuts the LEFT half first when a row does not fit.
+#   row 1: model effort · dir · branch ±git · PR/CI          alerts · context bar · clock
+#   row 2: 📋 Now / plan                                      📥 · 🚩 · 👥 · 🎯 label
+sep="${C_GRAY} · "
+left1="${C_ACCENT}${model}${effort:+ ${C_GRAY}${effort}}${sep}${dir}"
+[[ -n "$branch" ]] && left1+="${sep}${branch}${git_status:+ ${git_status}}"
 # PR + CI for a feature branch (no lookup on main/master): cached 2 min per repo+branch
 if [[ -n "$branch" && "$branch" != "main" && "$branch" != "master" ]]; then
     pr_key="pr-$(printf '%s' "$cwd@$branch" | md5 -q)"
     pr=$(cached "$pr_key" 120 pr_ci "$cwd")
-    [[ -n "$pr" ]] && output+=" · ${pr}"
+    [[ -n "$pr" ]] && left1+="${sep}${pr}"
 fi
-output+=" · ${ctx}${C_RESET}"
+left1+="${C_RESET}"
+
+C_ALERT='\033[38;5;167m'
+right1=""
 outage=$(cached claude-status 300 claude_status)
-[[ -n "$outage" ]] && output+=" ${C_ACCENT}·${C_RESET} \033[38;5;167m${outage}${C_RESET}"
-[[ -n "$ram" ]] && output+=" ${C_GRAY}·${C_RESET} \033[38;5;167m${ram}${C_RESET}"
+[[ -n "$outage" ]] && right1+="${C_ALERT}${outage}${sep}"
+[[ -n "$ram" ]] && right1+="${C_ALERT}${ram}${sep}"
+right1+="${ctx}${sep}$(date '+%-I:%M %p')${C_RESET}"
 
-
-# Session label: explicit $CLAUDE_TAB_LABEL (set by `cct "label"`), else the session
-# name Claude Code carries (`/rename`, `--name`, or the Clio session-registry hook's
-# first-prompt slug - 2026-09-12), else best-effort original task from the first
-# user message (command name if it was a slash command).
+# Session label: explicit $CLAUDE_TAB_LABEL (set by `cct "label"`); else, only when the session
+# has no name (the prompt's divider already shows a /rename or registry name), the original
+# task from the first user message (the command name if it was a slash command).
 session_label="$CLAUDE_TAB_LABEL"
-[[ -z "$session_label" ]] && session_label=$(echo "$input" | jq -r '.session_name // empty')
-if [[ -z "$session_label" && -n "$transcript_path" && -f "$transcript_path" ]]; then
+if [[ -z "$session_label" && -z "$(echo "$input" | jq -r '.session_name // empty')" \
+      && -n "$transcript_path" && -f "$transcript_path" ]]; then
     first_msg=$(jq -rs '
         def is_unhelpful: startswith("[Request interrupted") or startswith("[Request cancelled") or . == "";
         [.[] | select(.type == "user") |
@@ -198,21 +205,18 @@ if [[ -z "$session_label" && -n "$transcript_path" && -f "$transcript_path" ]]; 
         session_label="$first_msg"
     fi
 fi
-if [[ -n "$session_label" ]]; then
-    [[ ${#session_label} -gt 40 ]] && session_label="${session_label:0:37}..."
-    output+="${C_GRAY} · 🎯 ${C_ACCENT}${session_label}${C_RESET}"
-fi
-printf '%b\n' "$output"
+[[ ${#session_label} -gt 40 ]] && session_label="${session_label:0:37}..."
 
 # Day plan from the Clio conductor (2026-10-04): lib/conductor.py writes footer.json on
 # every tick; shown only while it is under 90 minutes old, so a stopped conductor drops out.
+# The Now title gets up to 80 chars; the aligner cuts it further on a narrow window.
 footer_json="$HOME/.clio/state/conductor/footer.json"
 if [[ -f "$footer_json" ]]; then
     plan_line=$(jq -r --arg cut "$(date -v-90M +%Y-%m-%dT%H:%M)" '
         def dur(m): if m < 60 then "\(m) min" elif m % 60 == 0 then "\(m / 60 | floor) h"
                     else "\(m / 60 | floor) h \(m % 60) min" end;
         select(.at >= $cut) |
-        (if .now then "Now: " + (.now | if length > 40 then .[0:38] + "…" else . end) else "Plan clear" end)
+        (if .now then "Now: " + (.now | if length > 80 then .[0:78] + "…" else . end) else "Plan clear" end)
         + " \(.done)/\(.planned)"
         + (if (.left_min // 0) > 0 then " · \(dur(.left_min))" else "" end)
     ' "$footer_json" 2>/dev/null)
@@ -224,10 +228,10 @@ clio_bits=""
 repo_root=$(git -C "$cwd" rev-parse --show-toplevel 2>/dev/null)
 if [[ -n "$repo_root" && -f "$repo_root/notebook/Inbox.md" ]]; then
     inbox_n=$(awk 'f && /^- /{c++} /^---$/{f=1} END{print c+0}' "$repo_root/notebook/Inbox.md" 2>/dev/null)
-    [[ "${inbox_n:-0}" -gt 10 ]] && clio_bits+=" · 📥 ${inbox_n}"
+    [[ "${inbox_n:-0}" -gt 10 ]] && clio_bits+="${sep}📥 ${inbox_n}"
     if [[ -f "$repo_root/queue/cam-flags.md" ]]; then
         flags_n=$(head -1 "$repo_root/queue/cam-flags.md" | sed -n 's/.*(open: \([0-9]*\)).*/\1/p')
-        [[ "${flags_n:-0}" -gt 0 ]] && clio_bits+=" · 🚩 ${flags_n}"
+        [[ "${flags_n:-0}" -gt 0 ]] && clio_bits+="${sep}🚩 ${flags_n}"
     fi
     own_sid=$(echo "$input" | jq -r '.session_id // empty')
     peers_n=0
@@ -239,10 +243,20 @@ if [[ -n "$repo_root" && -f "$repo_root/notebook/Inbox.md" ]]; then
         [[ -f "$reg" ]] && [[ $(jq -r --arg s "$p_sid" 'if .sessionId == $s and .kind == "interactive" then 1 else 0 end' "$reg" 2>/dev/null) == 1 ]] \
             && peers_n=$((peers_n + 1))
     done
-    [[ "$peers_n" -gt 0 ]] && clio_bits+=" · 👥 ${peers_n}"
+    [[ "$peers_n" -gt 0 ]] && clio_bits+="${sep}👥 ${peers_n}"
 fi
-if [[ -n "$plan_line" || -n "$clio_bits" ]]; then
-    line2="${plan_line:-}${clio_bits}"
-    line2="${line2# · }"
-    printf '%b\n' "${C_GRAY}📋 ${C_ACCENT}${line2}${C_RESET}"
-fi
+right2="${clio_bits}"
+[[ -n "$session_label" ]] && right2+="${sep}🎯 ${C_ACCENT}${session_label}"
+right2="${right2#"${sep}"}"
+[[ -n "$right2" ]] && right2="${C_ACCENT}${right2}${C_RESET}"
+left2=""
+[[ -n "$plan_line" ]] && left2="${C_GRAY}📋 ${C_ACCENT}${plan_line}${C_RESET}"
+
+# Usable width: $COLUMNS less Claude Code's 2-cell indent and 2-cell right margin (measured: it
+# cuts content past COLUMNS - 4 with an ellipsis), less 1 spare cell.
+cols=$(( ${COLUMNS:-0} > 5 ? COLUMNS - 5 : 0 ))
+PY=/opt/homebrew/bin/python3; [[ -x "$PY" ]] || PY=/usr/bin/python3   # not the pyenv shim: +80 ms a render
+{
+    printf '%b\t%b\n' "$left1" "$right1"
+    [[ -n "$left2" || -n "$right2" ]] && printf '%b\t%b\n' "$left2" "$right2"
+} | "$PY" -I "$HOME/.claude/scripts/statusline-align.py" "$cols"

@@ -27,6 +27,7 @@
 !.claude/hooks/*.py
 !.claude/scripts/
 !.claude/scripts/*.sh
+!.claude/scripts/*.py
 
 # iTerm2
 !.iterm2/
