@@ -121,9 +121,9 @@ if [[ -n "$cwd" && -d "$cwd" ]]; then
             read -r d_add d_del < <(git -C "$cwd" --no-optional-locks diff --numstat HEAD 2>/dev/null | awk '{a+=$1; d+=$2} END{print a+0, d+0}')
             git_status="\033[38;5;71m+${d_add}\033[0m \033[38;5;167m-${d_del}\033[0m"
         fi
-        [[ -n "$upstream" && "${ahead:-0}" -gt 0 ]] && git_status+="${git_status:+ }↑${ahead}"
-        [[ -n "$upstream" && "${behind:-0}" -gt 0 ]] && git_status+="${git_status:+ }↓${behind}"
-        [[ -z "$upstream" ]] && git_status+="${git_status:+ }no upstream"
+        [[ -n "$upstream" && "${ahead:-0}" -gt 0 ]] && git_status+="${git_status:+ }${C_GRAY}↑${ahead}"
+        [[ -n "$upstream" && "${behind:-0}" -gt 0 ]] && git_status+="${git_status:+ }${C_GRAY}↓${behind}"
+        [[ -z "$upstream" ]] && git_status+="${git_status:+ }${C_GRAY}no upstream"
     fi
 fi
 
@@ -142,6 +142,17 @@ level_color() {   # level_color <pct>  -> accent under 60, gold to 85, red above
     if (( $1 >= 85 )); then printf '%s' "$C_ALERT"; elif (( $1 >= 60 )); then printf '%s' "$C_WARN"; else printf '%s' "$C_ACCENT"; fi
 }
 
+meter() {   # meter <pct> <cells> <color>  -> full/half blocks, empty cells dim
+    local pct=$1 n=$2 c=$3 out="" i step=$((100 / $2)) progress
+    for ((i=0; i<n; i++)); do
+        progress=$((pct - i * step))
+        if (( progress * 10 >= step * 8 )); then out+="${c}█"
+        elif (( progress * 10 >= step * 3 )); then out+="${c}▄"
+        else out+="${C_BAR_EMPTY}░"; fi
+    done
+    printf '%s' "${out}${C_RESET}"
+}
+
 # Context: Claude Code's own used_percentage (2026-10-06; input + cache tokens of the last
 # API response, the same sum the old transcript scan made). It is null before the first
 # response and right after /compact; then show the ~20k baseline estimate (system prompt,
@@ -155,22 +166,12 @@ if [[ -z "$pct" ]]; then
 fi
 [[ $pct -gt 100 ]] && pct=100
 C_BAR=$(level_color "$pct")
-bar=""
-for ((i=0; i<5; i++)); do
-    progress=$((pct - i * 20))
-    if [[ $progress -ge 16 ]]; then
-        bar+="${C_BAR}█${C_RESET}"
-    elif [[ $progress -ge 6 ]]; then
-        bar+="${C_BAR}▄${C_RESET}"
-    else
-        bar+="${C_BAR_EMPTY}░${C_RESET}"
-    fi
-done
+bar=$(meter "$pct" 8 "$C_BAR")
 ctx="${bar} ${C_GRAY}${pct_prefix}${pct}%${C_RESET}"
 
 # Memory pressure (2026-10-06): ~10 sessions on a 16 GB Mac. Kernel level 1 = normal,
-# 2 = warn, 4 = critical; shown only above normal, with swap used/total colored by how full
-# swap is (accent under 60%, gold to 85%, red above).
+# 2 = warn, 4 = critical; shown only above normal, as a swap meter and used/total colored by
+# how full swap is (accent under 60%, gold to 85%, red above).
 ram=""
 case "$(sysctl -n kern.memorystatus_vm_pressure_level 2>/dev/null)" in
     2) ram_lvl="warn" ;;
@@ -179,8 +180,10 @@ case "$(sysctl -n kern.memorystatus_vm_pressure_level 2>/dev/null)" in
 esac
 if [[ -n "$ram_lvl" ]]; then
     read -r sw_used sw_total sw_pct < <(sysctl -n vm.swapusage 2>/dev/null | awk '{u=$6; t=$3; sub(/M/,"",u); sub(/M/,"",t); printf "%.1f %.0f %d\n", u/1024, t/1024, (t > 0 ? u*100/t : 0)}')
-    C_RAM=$(level_color "${sw_pct:-0}")
-    ram="${C_RAM}🧠 RAM ${ram_lvl}${sw_total:+ ${sw_used}/${sw_total}G}${C_RESET}"
+    C_SW=$(level_color "${sw_pct:-0}")
+    [[ "$ram_lvl" == "critical" ]] && C_LBL="$C_ALERT" || C_LBL="$C_WARN"
+    # e.g. "🧠 swap █████▄ 9.0/10G": label colored by kernel pressure, meter by swap fill
+    ram="${C_LBL}🧠 swap $(meter "${sw_pct:-0}" 5 "$C_SW") ${C_SW}${sw_used}${C_GRAY}/${sw_total}G${C_RESET}"
 fi
 
 # Prompt cache (2026-10-06): shown only in its last 15 minutes, then "cache cold" once it has
