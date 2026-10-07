@@ -22,6 +22,7 @@ case "$COLOR" in
 esac
 
 input=$(cat)
+printf "%s" "$input" > "$HOME/.cache/context-bar/last-input.json" 2>/dev/null   # debug: last payload
 
 # Extract model, directory, and cwd
 model=$(echo "$input" | jq -r '.model.display_name // .model.id // "?"')
@@ -125,10 +126,28 @@ fi
 # Get transcript path for the session-label fallback below
 transcript_path=$(echo "$input" | jq -r '.transcript_path // empty')
 
+# Shared colors (2026-10-06): every divider is the same dim " · "; each segment sets its own color.
+C_DIM='\033[38;5;240m'
+C_ALERT='\033[38;5;167m'
+C_WARN='\033[38;5;178m'
+sep="${C_DIM} · ${C_RESET}"
+join() {   # join <segment>...  -> segments joined by $sep, empty ones skipped
+    local out="" s
+    for s in "$@"; do [[ -n "$s" ]] && out+="${out:+$sep}$s"; done
+    printf '%s' "$out"
+}
+level_color() {   # level_color <pct>  -> accent under 60, gold to 85, red above
+    if (( $1 >= 85 )); then printf '%s' "$C_ALERT"; elif (( $1 >= 60 )); then printf '%s' "$C_WARN"; else printf '%s' "$C_ACCENT"; fi
+}
+dur() {   # dur <minutes>  -> "45 min" / "4 h 25 min"
+    local m=$1
+    if (( m < 60 )); then printf '%d min' "$m"; elif (( m % 60 == 0 )); then printf '%d h' $((m / 60)); else printf '%d h %d min' $((m / 60)) $((m % 60)); fi
+}
+
 # Context: Claude Code's own used_percentage (2026-10-06; input + cache tokens of the last
 # API response, the same sum the old transcript scan made). It is null before the first
 # response and right after /compact; then show the ~20k baseline estimate (system prompt,
-# tools, memory, env block) with a "~".
+# tools, memory, env block) with a "~". The bar turns gold at 60%, red at 85%.
 max_context=$(echo "$input" | jq -r '.context_window.context_window_size // 200000')
 pct=$(echo "$input" | jq -r '.context_window.used_percentage // empty | floor')
 pct_prefix=""
@@ -137,55 +156,90 @@ if [[ -z "$pct" ]]; then
     pct_prefix="~"
 fi
 [[ $pct -gt 100 ]] && pct=100
+C_BAR=$(level_color "$pct")
 bar=""
 for ((i=0; i<10; i++)); do
     progress=$((pct - i * 10))
     if [[ $progress -ge 8 ]]; then
-        bar+="${C_ACCENT}█${C_RESET}"
+        bar+="${C_BAR}█${C_RESET}"
     elif [[ $progress -ge 3 ]]; then
-        bar+="${C_ACCENT}▄${C_RESET}"
+        bar+="${C_BAR}▄${C_RESET}"
     else
         bar+="${C_BAR_EMPTY}░${C_RESET}"
     fi
 done
-ctx="${bar} ${C_GRAY}${pct_prefix}${pct}%"
+ctx="${bar} ${C_GRAY}${pct_prefix}${pct}%${C_RESET}"
 
 # Memory pressure (2026-10-06): ~10 sessions on a 16 GB Mac. Kernel level 1 = normal,
-# 2 = warn, 4 = critical; shown only above normal.
+# 2 = warn, 4 = critical; shown only above normal, with swap in use and the two biggest
+# apps by resident memory (helpers folded into their .app, claude-* into claude) so the
+# badge says what to quit. The ps scan runs in the background cache, 30 s.
+ram_top() {
+    local swap
+    swap=$(sysctl -n vm.swapusage 2>/dev/null | awk '{u=$6; t=$3; sub(/M/,"",u); sub(/M/,"",t); if (t > 0) printf "swap %.1f/%.0fG", u/1024, t/1024}')
+    ps -axo rss=,comm= | awk -v swap="$swap" '
+        { r = $1; $1 = ""; c = substr($0, 2)
+          if (match(c, /[^\/]+\.app\//)) n = substr(c, RSTART, RLENGTH - 5); else { n = c; sub(/.*\//, "", n) }
+          if (n ~ /^claude/) n = "claude"
+          s[n] += r; k[n]++ }
+        END {
+          for (n in s) if (s[n] > a) { b = a; bn = an; a = s[n]; an = n } else if (s[n] > b) { b = s[n]; bn = n }
+          out = swap
+          if (an != "") out = out (out ? " · " : "") an (k[an] > 1 ? "×" k[an] : "") sprintf(" %.1fG", a / 1048576)
+          if (bn != "") out = out " · " bn (k[bn] > 1 ? "×" k[bn] : "") sprintf(" %.1fG", b / 1048576)
+          print out }'
+}
+ram=""
 case "$(sysctl -n kern.memorystatus_vm_pressure_level 2>/dev/null)" in
-    2) ram="🧠 RAM warn" ;;
-    4) ram="🧠 RAM critical" ;;
-    *) ram="" ;;
+    2) ram_lvl="warn";     C_RAM="$C_WARN" ;;
+    4) ram_lvl="critical"; C_RAM="$C_ALERT" ;;
+    *) ram_lvl="" ;;
+esac
+if [[ -n "$ram_lvl" ]]; then
+    ram_detail=$(cached ram-top 30 ram_top)
+    ram="${C_RAM}🧠 RAM ${ram_lvl}${ram_detail:+ ${C_GRAY}(${ram_detail})}${C_RESET}"
+fi
+
+# Effort, color-coded (2026-10-06): low gray, medium accent, high gold, xhigh orange, max red.
+case "$effort" in
+    low)    C_EFF="$C_GRAY" ;;
+    medium) C_EFF="$C_ACCENT" ;;
+    high)   C_EFF="$C_WARN" ;;
+    xhigh)  C_EFF='\033[38;5;208m' ;;
+    max)    C_EFF="$C_ALERT" ;;
+    *)      C_EFF="$C_GRAY" ;;
 esac
 
 # Layout (2026-10-06): each row is LEFT<TAB>RIGHT, right-aligned to $COLUMNS (Claude Code sets
 # it for the script; tput cannot see the terminal) by statusline-align.py, which counts emoji
 # as 2 cells and cuts the LEFT half first when a row does not fit.
 #   row 1: model effort · dir · branch ±git · PR/CI          alerts · context bar · clock
-#   row 2: 📋 Now / plan                                      📥 · 🚩 · 👥 · 🎯 label
-sep="${C_GRAY} · "
-left1="${C_ACCENT}${model}${effort:+ ${C_GRAY}${effort}}${sep}${dir}"
-[[ -n "$branch" ]] && left1+="${sep}${branch}${git_status:+ ${git_status}}"
+#   row 2: Clio: 📋 Now / plan   else: 🎯 label · session    📥 · 🚩 · 👥 · 5h % · 7d %
+pr=""
 # PR + CI for a feature branch (no lookup on main/master): cached 2 min per repo+branch
 if [[ -n "$branch" && "$branch" != "main" && "$branch" != "master" ]]; then
     pr_key="pr-$(printf '%s' "$cwd@$branch" | md5 -q)"
     pr=$(cached "$pr_key" 120 pr_ci "$cwd")
-    [[ -n "$pr" ]] && left1+="${sep}${pr}"
 fi
-left1+="${C_RESET}"
+left1=$(join \
+    "${C_ACCENT}${model}${effort:+ ${C_EFF}${effort}}${C_RESET}" \
+    "${C_GRAY}${dir}${C_RESET}" \
+    "${branch:+${C_GRAY}${branch}${git_status:+ ${C_WARN}${git_status}}${C_RESET}}" \
+    "${pr:+${C_GRAY}${pr}${C_RESET}}")
 
-C_ALERT='\033[38;5;167m'
-right1=""
 outage=$(cached claude-status 300 claude_status)
-[[ -n "$outage" ]] && right1+="${C_ALERT}${outage}${sep}"
-[[ -n "$ram" ]] && right1+="${C_ALERT}${ram}${sep}"
-right1+="${ctx}${sep}$(date '+%-I:%M %p')${C_RESET}"
+right1=$(join \
+    "${outage:+${C_ALERT}${outage}${C_RESET}}" \
+    "$ram" \
+    "$ctx" \
+    "${C_GRAY}$(date '+%-I:%M %p')${C_RESET}")
 
 # Session label: explicit $CLAUDE_TAB_LABEL (set by `cct "label"`); else, only when the session
 # has no name (the prompt's divider already shows a /rename or registry name), the original
 # task from the first user message (the command name if it was a slash command).
+session_name=$(echo "$input" | jq -r '.session_name // empty')
 session_label="$CLAUDE_TAB_LABEL"
-if [[ -z "$session_label" && -z "$(echo "$input" | jq -r '.session_name // empty')" \
+if [[ -z "$session_label" && -z "$session_name" \
       && -n "$transcript_path" && -f "$transcript_path" ]]; then
     first_msg=$(jq -rs '
         def is_unhelpful: startswith("[Request interrupted") or startswith("[Request cancelled") or . == "";
@@ -207,31 +261,48 @@ if [[ -z "$session_label" && -z "$(echo "$input" | jq -r '.session_name // empty
 fi
 [[ ${#session_label} -gt 40 ]] && session_label="${session_label:0:37}..."
 
-# Day plan from the Clio conductor (2026-10-04): lib/conductor.py writes footer.json on
-# every tick; shown only while it is under 90 minutes old, so a stopped conductor drops out.
-# The Now title gets up to 80 chars; the aligner cuts it further on a narrow window.
-footer_json="$HOME/.clio/state/conductor/footer.json"
-if [[ -f "$footer_json" ]]; then
-    plan_line=$(jq -r --arg cut "$(date -v-90M +%Y-%m-%dT%H:%M)" '
-        def dur(m): if m < 60 then "\(m) min" elif m % 60 == 0 then "\(m / 60 | floor) h"
-                    else "\(m / 60 | floor) h \(m % 60) min" end;
-        select(.at >= $cut) |
-        (if .now then "Now: " + (.now | if length > 80 then .[0:78] + "…" else . end) else "Plan clear" end)
-        + " \(.done)/\(.planned)"
-        + (if (.left_min // 0) > 0 then " · \(dur(.left_min))" else "" end)
-    ' "$footer_json" 2>/dev/null)
-fi
+# Session stats (2026-10-06): wall time and lines changed this session, from the payload.
+IFS=$'\t' read -r s_ms s_add s_del < <(echo "$input" | jq -r '[.cost.total_duration_ms // 0, .cost.total_lines_added // 0, .cost.total_lines_removed // 0] | @tsv')
+s_min=$(( ${s_ms:-0} / 60000 ))
+session_stats="${C_GRAY}up $(dur "$s_min")${C_RESET}"
+(( ${s_add:-0} + ${s_del:-0} > 0 )) && session_stats+=" \033[38;5;71m+${s_add}${C_RESET} ${C_ALERT}-${s_del}${C_RESET}"
 
-# Clio counts (2026-10-05, replacing the clio-state-band mod): only in the Clio repo, and only
-# a count worth acting on - Inbox over 10 (the triage rule), open CAM flags, live peer sessions.
-clio_bits=""
+# Plan usage (2026-10-06): the 5-hour and 7-day rate-limit windows from the payload, colored
+# by level; the 5-hour one names its reset time once it passes 60%.
+limits=$(echo "$input" | jq -r '[.rate_limits.five_hour.used_percentage // "", .rate_limits.five_hour.resets_at // "", .rate_limits.seven_day.used_percentage // ""] | @tsv')
+IFS=$'\t' read -r l5 l5_reset l7 <<< "$limits"
+usage_bits=()
+if [[ -n "$l5" ]]; then
+    l5=${l5%.*}
+    seg="$(level_color "$l5")5h ${l5}%"
+    (( l5 >= 60 )) && [[ -n "$l5_reset" ]] && seg+=" ${C_GRAY}↻$(date -r "${l5_reset%.*}" '+%-I:%M %p')"
+    usage_bits+=("${seg}${C_RESET}")
+fi
+[[ -n "$l7" ]] && { l7=${l7%.*}; usage_bits+=("$(level_color "$l7")7d ${l7}%${C_RESET}"); }
+
+# Clio rows (2026-10-05): only in the Clio repo. Left: the conductor's day plan (lib/conductor.py
+# writes footer.json every tick; shown while under 90 minutes old). Right: counts worth acting
+# on - Inbox over 10 (the triage rule), open CAM flags, live peer sessions.
+clio_bits=()
+plan_line=""
 repo_root=$(git -C "$cwd" rev-parse --show-toplevel 2>/dev/null)
 if [[ -n "$repo_root" && -f "$repo_root/notebook/Inbox.md" ]]; then
+    footer_json="$HOME/.clio/state/conductor/footer.json"
+    if [[ -f "$footer_json" ]]; then
+        plan_line=$(jq -r --arg cut "$(date -v-90M +%Y-%m-%dT%H:%M)" '
+            def dur(m): if m < 60 then "\(m) min" elif m % 60 == 0 then "\(m / 60 | floor) h"
+                        else "\(m / 60 | floor) h \(m % 60) min" end;
+            select(.at >= $cut) |
+            [(if .now then "Now: " + (.now | if length > 70 then .[0:68] + "…" else . end) else "Plan clear" end),
+             "\(.done)/\(.planned) done",
+             (if (.left_min // 0) > 0 then "\(dur(.left_min)) left" else empty end)] | join("\t")
+        ' "$footer_json" 2>/dev/null)
+    fi
     inbox_n=$(awk 'f && /^- /{c++} /^---$/{f=1} END{print c+0}' "$repo_root/notebook/Inbox.md" 2>/dev/null)
-    [[ "${inbox_n:-0}" -gt 10 ]] && clio_bits+="${sep}📥 ${inbox_n}"
+    [[ "${inbox_n:-0}" -gt 10 ]] && clio_bits+=("${C_ACCENT}📥 ${inbox_n}${C_RESET}")
     if [[ -f "$repo_root/queue/cam-flags.md" ]]; then
         flags_n=$(head -1 "$repo_root/queue/cam-flags.md" | sed -n 's/.*(open: \([0-9]*\)).*/\1/p')
-        [[ "${flags_n:-0}" -gt 0 ]] && clio_bits+="${sep}🚩 ${flags_n}"
+        [[ "${flags_n:-0}" -gt 0 ]] && clio_bits+=("${C_ACCENT}🚩 ${flags_n}${C_RESET}")
     fi
     own_sid=$(echo "$input" | jq -r '.session_id // empty')
     peers_n=0
@@ -243,14 +314,19 @@ if [[ -n "$repo_root" && -f "$repo_root/notebook/Inbox.md" ]]; then
         [[ -f "$reg" ]] && [[ $(jq -r --arg s "$p_sid" 'if .sessionId == $s and .kind == "interactive" then 1 else 0 end' "$reg" 2>/dev/null) == 1 ]] \
             && peers_n=$((peers_n + 1))
     done
-    [[ "$peers_n" -gt 0 ]] && clio_bits+="${sep}👥 ${peers_n}"
+    [[ "$peers_n" -gt 0 ]] && clio_bits+=("${C_ACCENT}👥 ${peers_n}${C_RESET}")
 fi
-right2="${clio_bits}"
-[[ -n "$session_label" ]] && right2+="${sep}🎯 ${C_ACCENT}${session_label}"
-right2="${right2#"${sep}"}"
-[[ -n "$right2" ]] && right2="${C_ACCENT}${right2}${C_RESET}"
-left2=""
-[[ -n "$plan_line" ]] && left2="${C_GRAY}📋 ${C_ACCENT}${plan_line}${C_RESET}"
+
+# Row 2 left: the day plan in Clio; elsewhere (or with no live plan) the session's own label and stats.
+if [[ -n "$plan_line" ]]; then
+    IFS=$'\t' read -r -a plan_parts <<< "$plan_line"
+    plan_segs=("${C_ACCENT}${plan_parts[0]}${C_RESET}")
+    for p in "${plan_parts[@]:1}"; do plan_segs+=("${C_GRAY}${p}${C_RESET}"); done
+    left2="${C_GRAY}📋 $(join "${plan_segs[@]}" "$session_stats")"
+else
+    left2=$(join "${session_label:+${C_GRAY}🎯 ${C_ACCENT}${session_label}${C_RESET}}" "$session_stats")
+fi
+right2=$(join "${clio_bits[@]}" "${usage_bits[@]}")
 
 # Usable width: $COLUMNS less Claude Code's 2-cell indent and 2-cell right margin (measured: it
 # cuts content past COLUMNS - 4 with an ellipsis), less 1 spare cell.
