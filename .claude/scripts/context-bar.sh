@@ -170,8 +170,9 @@ bar=$(meter "$pct" 8 "$C_BAR")
 ctx="${bar} ${C_GRAY}${pct_prefix}${pct}%${C_RESET}"
 
 # Memory pressure (2026-10-06): ~10 sessions on a 16 GB Mac. Kernel level 1 = normal,
-# 2 = warn, 4 = critical; shown only above normal, as swap used/total, the used figure colored by
-# how full swap is (accent under 60%, gold to 85%, red above).
+# 2 = warn, 4 = critical; shown only above normal, with swap in use. macOS grows and shrinks
+# swap in 1 GB files on demand, so its "total" is not a ceiling - show used only, colored by
+# size against the 16 GB of RAM: accent under 4 GB, gold to 8 GB, red above.
 ram=""
 case "$(sysctl -n kern.memorystatus_vm_pressure_level 2>/dev/null)" in
     2) ram_lvl="warn" ;;
@@ -179,11 +180,11 @@ case "$(sysctl -n kern.memorystatus_vm_pressure_level 2>/dev/null)" in
     *) ram_lvl="" ;;
 esac
 if [[ -n "$ram_lvl" ]]; then
-    read -r sw_used sw_total sw_pct < <(sysctl -n vm.swapusage 2>/dev/null | awk '{u=$6; t=$3; sub(/M/,"",u); sub(/M/,"",t); printf "%.1f %.0f %d\n", u/1024, t/1024, (t > 0 ? u*100/t : 0)}')
-    C_SW=$(level_color "${sw_pct:-0}")
+    read -r sw_used sw_mb < <(sysctl -n vm.swapusage 2>/dev/null | awk '{u=$6; sub(/M/,"",u); printf "%.1f %d\n", u/1024, u}')
+    if (( ${sw_mb:-0} >= 8192 )); then C_SW="$C_ALERT"; elif (( ${sw_mb:-0} >= 4096 )); then C_SW="$C_WARN"; else C_SW="$C_ACCENT"; fi
     [[ "$ram_lvl" == "critical" ]] && C_LBL="$C_ALERT" || C_LBL="$C_WARN"
-    # e.g. "🧠 swap 9.0/10G": label colored by kernel pressure, used figure by swap fill
-    ram="${C_LBL}🧠 swap ${C_SW}${sw_used}${C_GRAY}/${sw_total}G${C_RESET}"
+    # e.g. "🧠 swap 7.1G": label colored by kernel pressure, the figure by swap size
+    ram="${C_LBL}🧠 swap ${C_SW}${sw_used}G${C_RESET}"
 fi
 
 # Prompt cache (2026-10-06): shown only in its last 15 minutes, then "cache cold" once it has
