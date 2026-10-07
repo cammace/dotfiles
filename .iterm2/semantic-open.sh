@@ -11,6 +11,11 @@
 # and repo roots, the fallback is the macOS default app instead of Chrome, and
 # the lowercase step works under /bin/bash 3.2.
 #
+# 2026-10-07: a miss exits 0 and is logged to $MISS_LOG. Any non-zero exit makes
+# iTerm2 raise a "Semantic History Command Failed" modal, and with "Always run
+# command" EVERY cmd-click lands here - so a plain word or a Claude Code slash
+# command (/skill-creator) popped the dialog. path:line:col is parsed too.
+#
 # Set SEMANTIC_OPEN_DRYRUN=1 to print the action instead of performing it.
 
 FILE="$1"
@@ -49,7 +54,10 @@ FILE="${FILE#[\`\'\"(<]}"
 FILE="${FILE%[\`\'\",.;)>]}"
 FILE="${FILE/#\~/$HOME}"
 RAW="$FILE" # pre-split, so localhost:3000 keeps its port below
-if [[ -z "$LINE" && "$FILE" =~ ^(.+):([0-9]+)$ ]]; then
+if [[ -z "$LINE" && "$FILE" =~ ^(.+):([0-9]+):[0-9]+$ ]]; then
+  FILE="${BASH_REMATCH[1]}" # compiler-style file:12:5 - the column is dropped
+  LINE="${BASH_REMATCH[2]}"
+elif [[ -z "$LINE" && "$FILE" =~ ^(.+):([0-9]+)$ ]]; then
   FILE="${BASH_REMATCH[1]}"
   LINE="${BASH_REMATCH[2]}"
 fi
@@ -84,8 +92,10 @@ if [[ -z "$RESOLVED" ]]; then
     # purpose: README.md or notes.txt must never become a web lookup.
     run open "https://$FILE"
   else
+    # Exit 0 on a miss: a non-zero exit is iTerm2's modal, not a quiet no-op.
+    MISS_LOG="$HOME/Library/Logs/semantic-open.log"
+    printf '%s miss pwd=%s text=%s\n' "$(date '+%F %T')" "$PWD" "$FILE" >>"$MISS_LOG" 2>/dev/null
     echo "semantic-open: not found: $FILE" >&2
-    exit 1
   fi
   exit 0
 fi
