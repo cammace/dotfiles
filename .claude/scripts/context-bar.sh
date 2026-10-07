@@ -171,33 +171,21 @@ done
 ctx="${bar} ${C_GRAY}${pct_prefix}${pct}%${C_RESET}"
 
 # Memory pressure (2026-10-06): ~10 sessions on a 16 GB Mac. Kernel level 1 = normal,
-# 2 = warn, 4 = critical; shown only above normal, with swap in use and the two biggest
-# apps by resident memory (helpers folded into their .app, claude-* into claude) so the
-# badge says what to quit. The ps scan runs in the background cache, 30 s.
-ram_top() {
-    local swap
-    swap=$(sysctl -n vm.swapusage 2>/dev/null | awk '{u=$6; t=$3; sub(/M/,"",u); sub(/M/,"",t); if (t > 0) printf "swap %.1f/%.0fG", u/1024, t/1024}')
-    ps -axo rss=,comm= | awk -v swap="$swap" '
-        { r = $1; $1 = ""; c = substr($0, 2)
-          if (match(c, /[^\/]+\.app\//)) n = substr(c, RSTART, RLENGTH - 5); else { n = c; sub(/.*\//, "", n) }
-          if (n ~ /^claude/) n = "claude"
-          s[n] += r; k[n]++ }
-        END {
-          for (n in s) if (s[n] > a) { b = a; bn = an; a = s[n]; an = n } else if (s[n] > b) { b = s[n]; bn = n }
-          out = swap
-          if (an != "") out = out (out ? " · " : "") an (k[an] > 1 ? "×" k[an] : "") sprintf(" %.1fG", a / 1048576)
-          if (bn != "") out = out " · " bn (k[bn] > 1 ? "×" k[bn] : "") sprintf(" %.1fG", b / 1048576)
-          print out }'
-}
-ram=""
+# 2 = warn, 4 = critical; shown only above normal.
 case "$(sysctl -n kern.memorystatus_vm_pressure_level 2>/dev/null)" in
-    2) ram_lvl="warn";     C_RAM="$C_WARN" ;;
-    4) ram_lvl="critical"; C_RAM="$C_ALERT" ;;
-    *) ram_lvl="" ;;
+    2) ram="${C_ALERT}🧠 RAM warn${C_RESET}" ;;
+    4) ram="${C_ALERT}🧠 RAM critical${C_RESET}" ;;
+    *) ram="" ;;
 esac
-if [[ -n "$ram_lvl" ]]; then
-    ram_detail=$(cached ram-top 30 ram_top)
-    ram="${C_RAM}🧠 RAM ${ram_lvl}${ram_detail:+ ${C_GRAY}(${ram_detail})}${C_RESET}"
+
+# Prompt cache (2026-10-06): shown only in its last 15 minutes, then "cache cold" once it has
+# expired - the next prompt re-sends the whole context uncached.
+cache=""
+IFS=$'\t' read -r c_exp c_req < <(echo "$input" | jq -r '[.prompt_cache.expires_at // "", .prompt_cache.requests // 0] | @tsv')
+if [[ -n "$c_exp" && "${c_req:-0}" -gt 0 ]]; then
+    c_left=$(( (${c_exp%.*} - $(date +%s)) / 60 ))
+    if (( c_left < 0 )); then cache="${C_ALERT}cache cold${C_RESET}"
+    elif (( c_left <= 15 )); then cache="${C_WARN}cache ${c_left} min${C_RESET}"; fi
 fi
 
 # Effort, color-coded (2026-10-06): low gray, medium accent, high gold, xhigh orange, max red.
@@ -230,6 +218,7 @@ left1=$(join \
 outage=$(cached claude-status 300 claude_status)
 right1=$(join \
     "${outage:+${C_ALERT}${outage}${C_RESET}}" \
+    "$cache" \
     "$ram" \
     "$ctx" \
     "${C_GRAY}$(date '+%-I:%M %p')${C_RESET}")
@@ -261,10 +250,10 @@ if [[ -z "$session_label" && -z "$session_name" \
 fi
 [[ ${#session_label} -gt 40 ]] && session_label="${session_label:0:37}..."
 
-# Session stats (2026-10-06): wall time and lines changed this session, from the payload.
+# Session stats (2026-10-06): wall time since the session started and lines changed this session, from the payload.
 IFS=$'\t' read -r s_ms s_add s_del < <(echo "$input" | jq -r '[.cost.total_duration_ms // 0, .cost.total_lines_added // 0, .cost.total_lines_removed // 0] | @tsv')
 s_min=$(( ${s_ms:-0} / 60000 ))
-session_stats="${C_GRAY}up $(dur "$s_min")${C_RESET}"
+session_stats="${C_GRAY}session $(dur "$s_min")${C_RESET}"
 (( ${s_add:-0} + ${s_del:-0} > 0 )) && session_stats+=" \033[38;5;71m+${s_add}${C_RESET} ${C_ALERT}-${s_del}${C_RESET}"
 
 # Plan usage (2026-10-06): the 5-hour and 7-day rate-limit windows from the payload, colored
