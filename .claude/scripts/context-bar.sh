@@ -170,7 +170,7 @@ bar=$(meter "$pct" 8 "$C_BAR")
 ctx="${bar} ${C_GRAY}${pct_prefix}${pct}%${C_RESET}"
 
 # Memory pressure (2026-10-06): ~10 sessions on a 16 GB Mac. Kernel level 1 = normal,
-# 2 = warn, 4 = critical; shown only above normal, as a swap meter and used/total colored by
+# 2 = warn, 4 = critical; shown only above normal, as swap used/total, the used figure colored by
 # how full swap is (accent under 60%, gold to 85%, red above).
 ram=""
 case "$(sysctl -n kern.memorystatus_vm_pressure_level 2>/dev/null)" in
@@ -182,8 +182,8 @@ if [[ -n "$ram_lvl" ]]; then
     read -r sw_used sw_total sw_pct < <(sysctl -n vm.swapusage 2>/dev/null | awk '{u=$6; t=$3; sub(/M/,"",u); sub(/M/,"",t); printf "%.1f %.0f %d\n", u/1024, t/1024, (t > 0 ? u*100/t : 0)}')
     C_SW=$(level_color "${sw_pct:-0}")
     [[ "$ram_lvl" == "critical" ]] && C_LBL="$C_ALERT" || C_LBL="$C_WARN"
-    # e.g. "🧠 swap █████▄ 9.0/10G": label colored by kernel pressure, meter by swap fill
-    ram="${C_LBL}🧠 swap $(meter "${sw_pct:-0}" 5 "$C_SW") ${C_SW}${sw_used}${C_GRAY}/${sw_total}G${C_RESET}"
+    # e.g. "🧠 swap 9.0/10G": label colored by kernel pressure, used figure by swap fill
+    ram="${C_LBL}🧠 swap ${C_SW}${sw_used}${C_GRAY}/${sw_total}G${C_RESET}"
 fi
 
 # Prompt cache (2026-10-06): shown only in its last 15 minutes, then "cache cold" once it has
