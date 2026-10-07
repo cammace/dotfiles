@@ -169,12 +169,19 @@ done
 ctx="${bar} ${C_GRAY}${pct_prefix}${pct}%${C_RESET}"
 
 # Memory pressure (2026-10-06): ~10 sessions on a 16 GB Mac. Kernel level 1 = normal,
-# 2 = warn, 4 = critical; shown only above normal.
+# 2 = warn, 4 = critical; shown only above normal, with swap used/total colored by how full
+# swap is (accent under 60%, gold to 85%, red above).
+ram=""
 case "$(sysctl -n kern.memorystatus_vm_pressure_level 2>/dev/null)" in
-    2) ram="${C_ALERT}🧠 RAM warn${C_RESET}" ;;
-    4) ram="${C_ALERT}🧠 RAM critical${C_RESET}" ;;
-    *) ram="" ;;
+    2) ram_lvl="warn" ;;
+    4) ram_lvl="critical" ;;
+    *) ram_lvl="" ;;
 esac
+if [[ -n "$ram_lvl" ]]; then
+    read -r sw_used sw_total sw_pct < <(sysctl -n vm.swapusage 2>/dev/null | awk '{u=$6; t=$3; sub(/M/,"",u); sub(/M/,"",t); printf "%.1f %.0f %d\n", u/1024, t/1024, (t > 0 ? u*100/t : 0)}')
+    C_RAM=$(level_color "${sw_pct:-0}")
+    ram="${C_RAM}🧠 RAM ${ram_lvl}${sw_total:+ ${sw_used}/${sw_total}G}${C_RESET}"
+fi
 
 # Prompt cache (2026-10-06): shown only in its last 15 minutes, then "cache cold" once it has
 # expired - the next prompt re-sends the whole context uncached.
