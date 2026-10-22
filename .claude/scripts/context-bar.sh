@@ -211,6 +211,16 @@ fi
 # so a countdown sat on "cache 4 min" all day (2026-10-22): show a dim "5m cache" instead.
 cache=""
 IFS=$'\t' read -r c_exp c_req c_ttl < <(echo "$input" | jq -r '[.prompt_cache.expires_at // "", .prompt_cache.requests // 0, .prompt_cache.ttl // ""] | @tsv')
+# TTL log (2026-10-22): the client asks for 1h, the API has written 5m in hour-long runs since
+# 10-12 with no fallback credit. One row per change of (session, ttl, 5h %, 7d %) to find the trigger.
+if [[ -n "$c_ttl" ]]; then
+    IFS=$'\t' read -r tl_sid tl_5h tl_7d < <(echo "$input" | jq -r '[.session_id[0:8], .rate_limits.five_hour.used_percentage // "", .rate_limits.seven_day.used_percentage // ""] | @tsv')
+    tl_key="$tl_sid $c_ttl $tl_5h $tl_7d"; tl_last="$CACHE_DIR/ttl-last-$tl_sid"
+    if [[ "$(cat "$tl_last" 2>/dev/null)" != "$tl_key" ]]; then
+        printf '%s\t%s\t%s\t%s\t%s\n' "$(date '+%Y-%m-%dT%H:%M:%S')" "$tl_sid" "$c_ttl" "$tl_5h" "$tl_7d" >> "$CACHE_DIR/ttl-log.tsv"
+        printf '%s' "$tl_key" > "$tl_last"
+    fi
+fi
 if [[ -n "$c_exp" && "${c_req:-0}" -gt 0 ]]; then
     c_sec=$(( ${c_exp%.*} - $(date +%s) ))
     if (( c_sec < 0 )); then cache="${C_ALERT}cache cold${C_RESET}"
