@@ -28,7 +28,7 @@ printf "%s" "$input" > "$HOME/.cache/context-bar/last-input.json" 2>/dev/null   
 model=$(echo "$input" | jq -r '.model.display_name // .model.id // "?"')
 effort=$(echo "$input" | jq -r '.effort.level // empty')   # live, follows /effort (2026-10-06)
 
-# Slow lookups (gh, status.claude.com) never run inline: the footer reads a cache file and,
+# Slow lookups (gh) never run inline: the footer reads a cache file and,
 # when it is older than its TTL, refreshes it in a detached background job. ~10 tabs share
 # one cache per key, and a .lock file keeps them from refreshing it all at once.
 CACHE_DIR="$HOME/.cache/context-bar"
@@ -54,9 +54,27 @@ pr_ci() {    # "#N ✓" / "#N ✗2" / "#N ●" for the branch's open PR; empty w
         "#\(.number)" + (if .isDraft then " draft" else "" end)
         + (if $bad > 0 then " ✗\($bad)" elif $wait > 0 then " ●" elif ($c | length) > 0 then " ✓" else "" end)'
 }
-claude_status() {   # status.claude.com: prints nothing while operational
-    curl -s --max-time 3 https://status.claude.com/api/v2/status.json \
-        | jq -r 'select(.status.indicator != "none") | "🔴 Claude: \(.status.description)"'
+bp_health() {   # Blueprint sheet health (2026-10-10): "BP 5 open (1 for Claude) · 2 ids · ✓ valid"
+    # Shown while ~/.claude/state/blueprint-on exists. Stand-in for the blueprint-companion mod's
+    # band until mods are rolled out to this account. Validate re-runs only when the sheet changes.
+    local root="$HOME/Developer/blueprint" sheet="house-floor-plans" out open waiting changed mt vf v srv
+    cd "$root" || return
+    out=$(/opt/homebrew/bin/pnpm -s comments "$sheet" 2>/dev/null)
+    open=$(printf '%s\n' "$out" | grep -cE '^[[:space:]]+• #')
+    waiting=$(printf '%s\n' "$out" | grep -cE '^[[:space:]]+↳')
+    changed=$(git --no-optional-locks diff -U0 HEAD -- "sheets/$sheet.yaml" | grep -cE '^[-+]  - id:')
+    mt=$(stat -f %m "sheets/$sheet.yaml"); vf="$CACHE_DIR/bp-validate"
+    if [[ "$(head -1 "$vf" 2>/dev/null)" != "$mt" ]]; then
+        { echo "$mt"; /opt/homebrew/bin/pnpm -s validate 2>&1 | grep "sheets/$sheet.yaml" | head -1; } > "$vf.tmp" && mv -f "$vf.tmp" "$vf"
+    fi
+    v=$(sed -n 2p "$vf" 2>/dev/null)
+    curl -s -o /dev/null -m 2 http://localhost:3737/ && srv="" || srv=" ${C_ALERT}:3737 down"
+    local forc=$(( open - waiting )) c_open="$C_GRAY" c_ids="$C_GRAY"
+    (( forc > 0 )) && c_open="$C_WARN"
+    (( changed > 0 )) && c_ids="$C_WARN"
+    printf '%s' "${C_ACCENT}BP ${c_open}${open} open (${forc} for Claude)${C_DIM} · ${c_ids}${changed} ids${C_DIM} · "
+    [[ "$v" == ✓* ]] && printf '%s' "${C_ACCENT}✓ valid" || printf '%s' "${C_ALERT}✗ validate"
+    printf '%s' "${srv}${C_RESET}"
 }
 cwd=$(echo "$input" | jq -r '.cwd // empty')
 dir=$(basename "$cwd" 2>/dev/null || echo "?")
@@ -187,14 +205,17 @@ if [[ -n "$ram_lvl" ]]; then
     ram="${C_LBL}🧠 swap ${C_SW}${sw_used}G${C_RESET}"
 fi
 
-# Prompt cache (2026-10-06): shown only in its last 15 minutes, then "cache cold" once it has
-# expired - the next prompt re-sends the whole context uncached.
+# Prompt cache (2026-10-06): "cache cold" once it has expired - the next prompt re-sends the
+# whole context uncached. On the 1 h cache, a countdown in its last 15 minutes. On the 5 min
+# cache (overage, or a model or route that gets no 1 h cache) every request resets the clock,
+# so a countdown sat on "cache 4 min" all day (2026-10-22): show a dim "5m cache" instead.
 cache=""
-IFS=$'\t' read -r c_exp c_req < <(echo "$input" | jq -r '[.prompt_cache.expires_at // "", .prompt_cache.requests // 0] | @tsv')
+IFS=$'\t' read -r c_exp c_req c_ttl < <(echo "$input" | jq -r '[.prompt_cache.expires_at // "", .prompt_cache.requests // 0, .prompt_cache.ttl // ""] | @tsv')
 if [[ -n "$c_exp" && "${c_req:-0}" -gt 0 ]]; then
-    c_left=$(( (${c_exp%.*} - $(date +%s)) / 60 ))
-    if (( c_left < 0 )); then cache="${C_ALERT}cache cold${C_RESET}"
-    elif (( c_left <= 15 )); then cache="${C_WARN}cache ${c_left} min${C_RESET}"; fi
+    c_sec=$(( ${c_exp%.*} - $(date +%s) ))
+    if (( c_sec < 0 )); then cache="${C_ALERT}cache cold${C_RESET}"
+    elif [[ "$c_ttl" == "5m" ]]; then cache="${C_GRAY}5m cache${C_RESET}"
+    elif (( c_sec <= 900 )); then cache="${C_WARN}cache $(( (c_sec + 59) / 60 )) min${C_RESET}"; fi
 fi
 
 # Effort, color-coded (2026-10-06): low gray, medium accent, high gold, xhigh orange, max red.
@@ -246,16 +267,18 @@ if [[ -n "$l5" ]] && (( l5 >= 60 )); then
 fi
 [[ -n "$l7" ]] && (( l7 >= 80 )) && usage=$(join "$usage" "$(level_color "$l7")7d ${l7}%${C_RESET}")
 
+bp=""
+[[ -f "$HOME/.claude/state/blueprint-on" ]] && bp=$(cached bp-health 30 bp_health)
+
 left=$(join \
     "${C_ACCENT}${model}${effort:+ ${C_EFF}${effort}}${C_RESET}" \
     "${C_GRAY}${dir}${C_RESET}" \
     "${branch:+${C_GRAY}${branch}${git_status:+ ${git_status}}${C_RESET}}" \
     "${pr:+${C_GRAY}${pr}${C_RESET}}" \
+    "$bp" \
     "${plan:+${C_ACCENT}${plan}${C_RESET}}")
 
-outage=$(cached claude-status 300 claude_status)
 right=$(join \
-    "${outage:+${C_ALERT}${outage}${C_RESET}}" \
     "$ram" \
     "$cache" \
     "$flags" \
