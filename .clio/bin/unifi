@@ -168,17 +168,50 @@ cmd_client_set_note() {
   _client_put "$sel" "$(jq -nc --arg n "$note" '{noted:true, note:$n}')"
 }
 
+# Resolves the network_id a reservation should bind to, in order:
+#   1. The live association (stat/sta) for the mac — most current, since a
+#      client can move VLANs without its /rest/user record catching up.
+#   2. The resolved /rest/user record's own network_id, if it already has one.
+#   3. last_connection_network_name mapped through /rest/networkconf by name.
+# Prints nothing (not the string "null") if none resolve, so the caller can
+# `die` instead of writing a null network_id — the bug this exists to fix
+# (2026-09-22, Tincan phone: reserve-ip left network_id null, had to be bound
+# by hand with `client update`).
+_client_network_id() {
+  local rec="$1" mac nid name
+  mac="$(jq -r '.mac' <<<"$rec")"
+  nid="$(_curl "$(_legacy "/stat/sta")" \
+    | jq -r --arg m "$mac" '.data[] | select(.mac==$m) | (.network_id // .last_connection_network_id) // empty' \
+    | head -1)"
+  if [[ -z "$nid" ]]; then
+    nid="$(jq -r '.network_id // empty' <<<"$rec")"
+  fi
+  if [[ -z "$nid" ]]; then
+    name="$(jq -r '.last_connection_network_name // empty' <<<"$rec")"
+    if [[ -n "$name" ]]; then
+      nid="$(_curl "$(_legacy "/rest/networkconf")" \
+        | jq -r --arg n "$name" '.data[] | select(.name==$n) | ._id' \
+        | head -1)"
+    fi
+  fi
+  printf '%s' "$nid"
+}
+
 cmd_client_reserve_ip() {
   local sel="${1:-}" ip="${2:-}"
   [[ -n "$sel" ]] || die 'usage: unifi client reserve-ip <mac|ip|id> [<ip>]  (omit ip → reserve current)'
+  local rec nid
+  rec="$(_resolve_selector "$sel")"
   if [[ -z "$ip" ]]; then
-    ip="$(_resolve_selector "$sel" | jq -r '.fixed_ip // empty')"
+    ip="$(jq -r '.fixed_ip // empty' <<<"$rec")"
     if [[ -z "$ip" ]]; then
-      ip="$(_curl "$(_legacy "/stat/sta")" | jq -r --arg m "$(_resolve_selector "$sel" | jq -r .mac)" '.data[] | select(.mac==$m) | .ip' | head -1)"
+      ip="$(_curl "$(_legacy "/stat/sta")" | jq -r --arg m "$(jq -r '.mac' <<<"$rec")" '.data[] | select(.mac==$m) | .ip' | head -1)"
     fi
     [[ -n "$ip" ]] || die "could not determine current IP; pass one explicitly"
   fi
-  _client_put "$sel" "$(jq -nc --arg ip "$ip" '{use_fixedip:true, fixed_ip:$ip}')"
+  nid="$(_client_network_id "$rec")"
+  [[ -n "$nid" ]] || die "could not determine network_id for '$sel' (no live association, no existing network_id, no matching networkconf name) — refusing to write a null network_id; bind it by hand with 'client update' after confirming the network in the controller UI"
+  _client_put "$sel" "$(jq -nc --arg ip "$ip" --arg nid "$nid" '{use_fixedip:true, fixed_ip:$ip, network_id:$nid}')"
 }
 
 cmd_client_clear_reservation() {
