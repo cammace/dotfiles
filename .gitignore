@@ -36,6 +36,12 @@
 
 # Homebrew
 !Brewfile
+!Brewfile.laptop
+!Brewfile.server
+
+# Bootstrap
+!bootstrap.sh
+!macos-server.sh
 
 # Scripts
 !tmux_picker.sh

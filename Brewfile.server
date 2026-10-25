@@ -1,0 +1,17 @@
+# Brewfile.server - extras for the headless, always-on Mac mini.
+# bootstrap.sh --role server runs this after Brewfile.
+# Server-only sudo settings (sleep, wake-on-LAN, sharing) live in macos-server.sh.
+
+# --- Formulae ---
+# Create, run, and share large language models (LLMs)
+brew "ollama", restart_service: :changed
+# Port of OpenAI's Whisper model in C/C++
+brew "whisper.cpp"
+
+# --- Casks ---
+# App to build and share containerised applications and microservices
+cask "docker-desktop"  # unsure: needs a logged-in GUI session (auto-login); colima, below, runs headless
+
+# --- Not yet installed ---
+# Headless Docker alternative to Docker Desktop. Not installed anywhere yet.
+# brew "colima"  # unsure: pick colima or docker-desktop for the mini

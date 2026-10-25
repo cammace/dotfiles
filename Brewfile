@@ -1,150 +1,230 @@
-# Taps
-tap "1password/tap"
+# Brewfile - common to every machine (laptop and server).
+# bootstrap.sh runs this, then Brewfile.<role>. Generated 2026-10-25 from
+# `brew bundle dump` on the MacBook. `# unsure:` marks a placement to confirm;
+# `# STALE` lines were in the old Brewfile but are not installed, so they stay
+# commented out until someone decides.
+
+# --- Taps ---
+tap "hudochenkov/sshpass"
+tap "jetbrains/utils", "https://github.com/JetBrains/homebrew-utils"
 tap "micronaut-projects/tap"
+tap "oven-sh/bun"
 
-# Homebrew Packages
-brew "fzf"
-brew "bat"
-brew "ripgrep"
-brew "htop"
-brew "tldr"
-brew "zoxide"
-brew "docker-compose"
-brew "eza"
-brew "fd"
-brew "watch"
-brew "zsh-autosuggestions"
+# --- Formulae ---
+# Run your GitHub Actions locally
+brew "act"
+# Static checker for GitHub Actions workflow files
+brew "actionlint"
+# Simple, modern, secure file encryption
 brew "age"
-brew "sops"
-brew "aider"
+# Code searching, linting, rewriting
+brew "ast-grep"
+# Automatic configure script builder
+brew "autoconf"
+# Cryptography and SSL/TLS Toolkit
+brew "openssl@3", link: true
+# Shell extension to jump to frequently used directories
+brew "autojump"  # unsure: stale? zoxide replaces it and .zshrc never loads autojump
+# Tool for generating GNU Standards-compliant Makefiles
+brew "automake"
+# Official Amazon AWS command-line interface
 brew "awscli"
-brew "coreutils"
-brew "curl"
-brew "docker"
-brew "duti"
-brew "gh"
-brew "git"
-brew "gitleaks"
-brew "gnupg"
-brew "jenv"
-brew "libevent"
+# Microsoft Azure CLI 2.0
+brew "azure-cli"
+# C library implementing the SSH2 protocol
 brew "libssh2"
-brew "mas"
-brew "nmap"
+# Clone of cat(1) with syntax highlighting and Git integration
+brew "bat"
+# Powerful, enterprise-ready, open source web server with automatic HTTPS
+brew "caddy"  # unsure: local dev web server; needed on either box?
+# Manage multiple AI agents like Claude Code, Aider and Codex in your terminal
+brew "claude-squad"
+# GNU File, Shell, and Text utilities
+brew "coreutils"
+# Tool for interacting with remote images and registries
+brew "crane"
+# Get a file from an HTTP, HTTPS or FTP server
+brew "curl"
+# Load/unload environment variables based on $PWD
+brew "direnv"
+# Pack, ship and run any application as a lightweight container
+brew "docker"
+# Isolated development environments using Docker
+brew "docker-compose"
+# Modern, maintained replacement for ls
+brew "eza"
+# Simple, fast and user-friendly alternative to find
+brew "fd"
+# Command-line fuzzy finder written in Go
+brew "fzf"
+# Easily access your Google Calendar(s) from a command-line
+brew "gcalcli"
+# Open-source, cross-platform JavaScript runtime environment
 brew "node"
-brew "openjdk@11"
+# Interact with Google Gemini AI models from the command-line
+brew "gemini-cli"
+# GitHub command-line tool
+brew "gh"
+# Distributed revision control system
+brew "git"
+# Audit git repos for secrets
+brew "gitleaks"
+# GNU Privacy Guard (OpenPGP)
+brew "gnupg"
+# Open source programming language to build simple/reliable/efficient software
+brew "go"
+# CLI for Drive, Gmail, Calendar, Sheets, Docs, Chat, Admin, and more
+brew "googleworkspace-cli"
+# Generic library support script
+brew "libtool"
+# Graph visualization software from AT&T and Bell Labs
+brew "graphviz"
+# Improved top (interactive process viewer)
+brew "htop"
+# Tools and libraries to manipulate images in select formats
+brew "imagemagick"
+# Manage your Java environment
+brew "jenv"
+# Asynchronous event library
+brew "libevent"
+# Postgres C API library
+brew "libpq"
+# Library for database change tracking
+brew "liquibase"  # unsure: Viewer DB migrations; keep on both?
+# Mac App Store command-line interface
+brew "mas"
+# Port scanning utility for large networks
+brew "nmap"
+# Manage multiple Node.js versions
+brew "nvm"
+# Development kit for the Java programming language
+brew "openjdk@11"  # unsure: still needed beside 17/21/25?
+# Development kit for the Java programming language
 brew "openjdk@17"
+# Development kit for the Java programming language
 brew "openjdk@21"
+# Development kit for the Java programming language
+brew "openjdk@25"
+# Open source suite of directory software
 brew "openldap"
-brew "pnpm"
+# PNG file optimizer
+brew "optipng"
+# Swiss-army knife of markup format conversion
+brew "pandoc"
+# Execute binaries from Python packages in isolated environments
+brew "pipx"
+# Package compiler and linker metadata toolkit
+brew "pkgconf"
+# PDF rendering library (based on the xpdf-3.0 code base)
+brew "poppler"
+# Object-relational database system
+brew "postgresql@18", link: true
+# Python version management
 brew "pyenv"
-brew "python@3.10"
+# Interpreted, interactive, object-oriented programming language
 brew "python@3.11"
+# Tools for and transforming and inspecting PDF files
+brew "qpdf"
+# Pack repository contents into a single AI-friendly file
+brew "repomix"
+# Search tool like grep and The Silver Searcher
+brew "ripgrep"
+# Tool for downloading RTMP streaming media
 brew "rtmpdump"
+# Powerful, clean, object-oriented scripting language
+brew "ruby"
+# Extremely fast Python linter, written in Rust
+brew "ruff"
+# 7-Zip is a file archiver with a high compression ratio
+brew "sevenzip"
+# Create beautiful image of your source code
+brew "silicon"
+# SOcket CAT: netcat on steroids
+brew "socat"
+# Editor of encrypted files
+brew "sops"
+# PureScript package manager and build tool
+brew "spago"  # unsure: stale? PureScript, no known project uses it
+# Microsoft SQL Server command-line interface
+brew "sqlcmd"
+# Cross-shell prompt for astronauts
 brew "starship"
+# OCR (Optical Character Recognition) engine
+brew "tesseract"
+# Multi-modal AI tool to extract and summarize content
+brew "summarize"
+# Nodejs-based tool for optimizing SVG vector graphics files
+brew "svgo"
+# Generate scripting interfaces to C/C++ code
+brew "swig"
+# User interface to the TELNET protocol
+brew "telnet"
+# Terminal multiplexer
+brew "tmux"
+# Your CLI home video recorder
+brew "vhs"
+# Executes a program periodically, showing output fullscreen
+brew "watch"
+# ISO9660+RR manipulation tool
+brew "xorriso"
+# JavaScript package manager
+brew "yarn"
+# Shell extension to navigate your filesystem faster
+brew "zoxide"
+brew "hudochenkov/sshpass/sshpass", trusted: true
+# Official Language Server Protocol for the Kotlin language
+brew "jetbrains/utils/kotlin-lsp", trusted: true
+# Incredibly fast JavaScript runtime, bundler, transpiler and package manager - all in one.
+brew "oven-sh/bun/bun", trusted: true
+# Package installer for Python; the uv entries below need it on a fresh Mac
+brew "uv"  # NEW: the laptop has uv from the standalone installer in ~/.local/bin
 
-# Casks
-cask_args appdir: "/Applications"
-
-cask "1password"
+# --- Casks ---
+# Password manager that keeps all passwords secure behind one password
+cask "1password", args: { appdir: "/Applications" }
+# Command-line interface for 1Password
 cask "1password-cli"
-cask "contexts"
-cask "dbeaver-community"
-cask "font-fira-code-nerd-font"
-cask "font-hack-nerd-font"
-cask "font-monaspace"
-cask "fontbase"
-cask "google-chrome"
-cask "google-cloud-sdk"
-cask "gqrx"
-cask "iterm2"
-cask "jetbrains-toolbox"
-cask "josm"
-cask "micronaut"
-cask "qlmarkdown"
-cask "replacicon"
-cask "setapp"
-cask "spotify"
-cask "tower"
-cask "transmission"
-cask "visual-studio-code"
-cask "vlc"
-cask "zoom"
+# OpenAI's coding agent that runs in your terminal
+cask "codex"
+# Brings the power of Copilot coding agent directly to your terminal
+cask "copilot-cli"
+# Set of tools to manage resources and applications hosted on Google Cloud
+cask "gcloud-cli", args: { appdir: "/Applications" }
+# Free cross-platform office suite, fresh version
+cask "libreoffice"  # unsure: Clio office skills convert with soffice; the mini runs those jobs
+cask "micronaut-projects/tap/micronaut", args: { appdir: "/Applications" }, trusted: true
+# Plugin for AWS CLI to start and end sessions that connect to managed instances
+cask "session-manager-plugin"
+# Mesh VPN based on WireGuard
+cask "tailscale-app"  # unsure: GUI app needs a login session on the mini; the tailscale formula runs headless as a daemon
 
-# App Store Apps
-mas "Slack", id: 803453959
-mas "Amphetamine", id: 937984704
-mas "Home Assistant", id: 1099568401
-mas "CardPointers", id: 1472875808
-mas "iMovie", id: 408981434
+# --- Go ---
+go "github.com/rhysd/actionlint/cmd/actionlint"  # duplicate of brew actionlint
 
-# Visual Studio Code plugins
-vscode "1password.op-vscode"
-vscode "alefragnani.project-manager"
-vscode "amazonwebservices.amazon-q-vscode"
-vscode "be5invis.toml"
-vscode "bradlc.vscode-tailwindcss"
-vscode "burkeholland.simple-react-snippets"
-vscode "christian-kohler.path-intellisense"
-vscode "codebuddyai.codebuddy-ai"
-vscode "codezombiech.gitignore"
-vscode "dsznajder.es7-react-js-snippets"
-vscode "editorconfig.editorconfig"
-vscode "emilast.logfilehighlighter"
-vscode "esbenp.prettier-vscode"
-vscode "fwcd.kotlin"
-vscode "github.copilot"
-vscode "github.copilot-chat"
-vscode "github.github-vscode-theme"
-vscode "github.remotehub"
-vscode "k--kato.intellij-idea-keybindings"
-vscode "keesschollaart.vscode-home-assistant"
-vscode "lukas-tr.materialdesignicons-intellisense"
-vscode "mathiasfrohlich.kotlin"
-vscode "mechatroner.rainbow-csv"
-vscode "mikestead.dotenv"
-vscode "ms-azuretools.vscode-docker"
-vscode "ms-python.debugpy"
-vscode "ms-python.isort"
-vscode "ms-python.pylint"
-vscode "ms-python.python"
-vscode "ms-python.vscode-pylance"
-vscode "ms-toolsai.jupyter"
-vscode "ms-toolsai.jupyter-keymap"
-vscode "ms-toolsai.jupyter-renderers"
-vscode "ms-toolsai.vscode-jupyter-cell-tags"
-vscode "ms-toolsai.vscode-jupyter-slideshow"
-vscode "ms-vscode-remote.remote-containers"
-vscode "ms-vscode-remote.remote-ssh"
-vscode "ms-vscode-remote.remote-ssh-edit"
-vscode "ms-vscode-remote.remote-wsl"
-vscode "ms-vscode-remote.vscode-remote-extensionpack"
-vscode "ms-vscode.remote-explorer"
-vscode "ms-vscode.remote-repositories"
-vscode "ms-vscode.remote-server"
-vscode "ms-vscode.vscode-typescript-next"
-vscode "msjsdiag.vscode-react-native"
-vscode "mtxr.sqltools"
-vscode "naco-siren.gradle-language"
-vscode "netcorext.uuid-generator"
-vscode "nicolasvuillamy.vscode-groovy-lint"
-vscode "pkief.material-icon-theme"
-vscode "redhat.java"
-vscode "redhat.vscode-xml"
-vscode "redhat.vscode-yaml"
-vscode "rvest.vs-code-prettier-eslint"
-vscode "tomiy.windev-wlanguage"
-vscode "usernamehw.errorlens"
-vscode "visualstudioexptteam.intellicode-api-usage-examples"
-vscode "visualstudioexptteam.vscodeintellicode"
-vscode "vscjava.vscode-gradle"
-vscode "vscjava.vscode-java-debug"
-vscode "vscjava.vscode-java-dependency"
-vscode "vscjava.vscode-java-pack"
-vscode "vscjava.vscode-java-test"
-vscode "vscjava.vscode-maven"
-vscode "vue.volar"
-vscode "whizkydee.material-palenight-theme"
-vscode "yzhang.markdown-all-in-one"
-vscode "zainchen.json"
-vscode "zhuangtongfa.material-theme"
+# --- uv tools ---
+uv "claude-swap"
+uv "nano-pdf"
+
+# --- npm globals ---
+npm "@box/cli"
+npm "@karakeep/cli"
+npm "@modelcontextprotocol/server-postgres"
+npm "@pnp/cli-microsoft365"
+npm "agent-browser"
+npm "aws-cdk"
+npm "corepack"
+npm "defuddle-cli"
+npm "docx"
+npm "mcporter"
+npm "taskforge-md"
+npm "typescript-language-server"
+npm "typescript"
+
+# --- Stale (from the 04-05 Brewfile, flagged for review) ---
+# tap "1password/tap"  # STALE: no installed item uses it
+# brew "aider"  # STALE: listed 04-05, not installed
+# brew "pnpm"  # STALE: listed 04-05, not installed (corepack, below, provides pnpm)
+# brew "python@3.10"  # STALE: not installed; deprecated upstream
+# brew "tldr"  # STALE: not installed; disabled in Homebrew (tlrc replaces it)
+# brew "zsh-autosuggestions"  # STALE: not installed; Oh My Zsh custom plugin supplies it (bootstrap.sh clones it)
+# cask "google-cloud-sdk"  # STALE: renamed to gcloud-cli, which is listed above
