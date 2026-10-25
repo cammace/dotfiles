@@ -297,8 +297,10 @@ alias opencode='~/.config/opencode/launch.sh --auto'
 # that raises macOS permission prompts nobody can answer, and a locked
 # 1Password stalls every new shell, so the server only gets Clio's bin dir and
 # loads the rest on demand with `load-clio-env`.
+# Keep the source line unindented and byte-exact: Clio's ops/bootstrap.sh
+# greps for it (grep -Fx) and appends an ungated copy if it is missing.
 if [[ "$MACHINE_ROLE" == laptop ]]; then
-  [ -f "$HOME/.clio/env" ] && source "$HOME/.clio/env"
+[ -f "$HOME/.clio/env" ] && source "$HOME/.clio/env"
 else
   [[ -d "$HOME/.clio/bin" ]] && export PATH="$HOME/.clio/bin:$PATH"
   load-clio-env() { [ -f "$HOME/.clio/env" ] && source "$HOME/.clio/env"; }
