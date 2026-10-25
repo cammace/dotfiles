@@ -6,10 +6,12 @@ always-on **server**.
 
 ## Setup
 
-On a new Mac, run one line. It uses HTTPS, so no SSH key is needed yet:
+On a new Mac, run this. It uses HTTPS, so no SSH key is needed yet. Downloading to a file first means a
+failed download stops at `curl` instead of silently running nothing:
 
 ```bash
-bash -c "$(curl -fsSL https://raw.githubusercontent.com/cammace/dotfiles/main/bootstrap.sh)" bootstrap --role server
+curl -fsSLo /tmp/bootstrap.sh https://raw.githubusercontent.com/cammace/dotfiles/main/bootstrap.sh \
+  && bash /tmp/bootstrap.sh --role server
 ```
 
 Use `--role laptop` for a laptop. Run it from a terminal session (local, Screen Sharing or `ssh -t`): the
@@ -38,10 +40,12 @@ Flags:
 | `--repo URL\|PATH` | Clones from somewhere else, such as a local `~/.cfg` for a test (also `DOTFILES_REPO`). |
 | `--skip-network` | Skips the network installs: CLT, Homebrew, `brew bundle`, Oh My Zsh, plugins, TPM. |
 
-To run a branch before it is merged, fetch the script from that branch and pass the same branch:
+To run a branch before it is merged (`main` has no `bootstrap.sh` until then), fetch the script from that
+branch and pass the same branch:
 
 ```bash
-bash -c "$(curl -fsSL https://raw.githubusercontent.com/cammace/dotfiles/BRANCH/bootstrap.sh)" bootstrap --role server --branch BRANCH
+curl -fsSLo /tmp/bootstrap.sh https://raw.githubusercontent.com/cammace/dotfiles/BRANCH/bootstrap.sh \
+  && bash /tmp/bootstrap.sh --role server --branch BRANCH
 ```
 
 ### Server only

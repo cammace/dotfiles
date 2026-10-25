@@ -2,12 +2,14 @@
 # bootstrap.sh - set up a Mac from this dotfiles repo. Idempotent: safe to re-run.
 #
 # New Mac (HTTPS, no SSH key needed):
-#   bash -c "$(curl -fsSL https://raw.githubusercontent.com/cammace/dotfiles/main/bootstrap.sh)" \
-#     bootstrap --role server
+#   curl -fsSLo /tmp/bootstrap.sh https://raw.githubusercontent.com/cammace/dotfiles/main/bootstrap.sh \
+#     && bash /tmp/bootstrap.sh --role server
 #
-# Prefer that form to `curl ... | bash`: it keeps stdin on the terminal, so the
-# Homebrew installer and cask installs can ask for the sudo password. Under a
-# pipe, the in_tty helper below reattaches them to /dev/tty instead.
+# Prefer that form to `curl ... | bash` or `bash -c "$(curl ...)"`: a failed
+# download stops at curl instead of running an empty script that exits 0, and
+# stdin stays on the terminal so the Homebrew installer can ask for the sudo
+# password. Under a pipe, the in_tty helper below reattaches installers to
+# /dev/tty.
 #
 # Usage: bootstrap.sh [--role laptop|server] [--dry-run] [--branch NAME]
 #                     [--repo URL|PATH] [--skip-network]
@@ -60,10 +62,12 @@ run() {
 # Under `curl | bash` stdin is the script itself: an installer reading it would
 # swallow the rest of this file, and Homebrew refuses sudo without a TTY.
 in_tty() {
-  if [ ! -t 0 ] && (: < /dev/tty) 2>/dev/null; then
+  if [ -t 0 ]; then
+    "$@"
+  elif (: < /dev/tty) 2>/dev/null; then
     "$@" < /dev/tty
   else
-    "$@"
+    "$@" < /dev/null
   fi
 }
 
@@ -144,7 +148,12 @@ else
   # shellcheck disable=SC2016  # printed literally, not expanded
   printf '  + /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"\n'
   if [ "$DRY_RUN" -eq 0 ]; then
-    in_tty /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+    # Download first: `bash -c "$(curl ...)"` runs an empty script and exits 0
+    # when curl fails.
+    brew_installer="$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)" \
+      || die "could not download the Homebrew installer"
+    in_tty /bin/bash -c "$brew_installer" || die "the Homebrew installer failed"
+    [ -x "$BREW" ] || die "Homebrew installer finished but $BREW is missing"
   fi
 fi
 # The tracked .zprofile evals `brew shellenv` for login shells; this does the
@@ -177,18 +186,52 @@ if [ "$DRY_RUN" -eq 1 ] && [ ! -d "$GIT_DIR_CFG" ]; then
 elif [ -n "$(cfg ls-files 2>/dev/null | head -1)" ]; then
   # A populated index means an earlier run already checked out. Leave the work
   # tree alone so local edits are never touched on a re-run.
-  echo "  already checked out (branch: $(cfg symbolic-ref --short -q HEAD || echo detached)); leaving the work tree alone"
+  current_branch="$(cfg symbolic-ref --short -q HEAD || echo detached)"
+  echo "  already checked out (branch: $current_branch); leaving the work tree alone"
+  [ "$current_branch" = "$BRANCH" ] \
+    || warn "--branch $BRANCH ignored: the existing checkout is on $current_branch (switch with: git --git-dir=$GIT_DIR_CFG --work-tree=$HOME switch $BRANCH)"
 else
   moved=0
+  # Move aside whatever is in the way of a tracked path: the path itself, or
+  # a parent that is a file or a symlink (git will not write through either).
+  # `planned` stops a dry run, where nothing actually moves, from listing a
+  # blocking parent once per tracked file under it.
+  planned=""
+  backup_one() {
+    case "
+$planned
+" in *"
+$1
+"*) return 0 ;; esac
+    run mkdir -p "$(dirname "$BACKUP_DIR/$1")"
+    run mv "$HOME/$1" "$BACKUP_DIR/$1"
+    planned="$planned
+$1"
+    moved=$((moved + 1))
+  }
   while IFS= read -r path; do
     [ -n "$path" ] || continue
-    if [ -e "$HOME/$path" ] || [ -L "$HOME/$path" ]; then
-      run mkdir -p "$(dirname "$BACKUP_DIR/$path")"
-      run mv "$HOME/$path" "$BACKUP_DIR/$path"
-      moved=$((moved + 1))
+    blocked=""
+    prefix=""
+    rest="$path"
+    while [ "${rest#*/}" != "$rest" ]; do
+      prefix="${prefix:+$prefix/}${rest%%/*}"
+      rest="${rest#*/}"
+      if [ -L "$HOME/$prefix" ] || { [ -e "$HOME/$prefix" ] && [ ! -d "$HOME/$prefix" ]; }; then
+        blocked="$prefix"
+        break
+      fi
+    done
+    if [ -n "$blocked" ]; then
+      backup_one "$blocked"
+    elif [ -e "$HOME/$path" ] || [ -L "$HOME/$path" ]; then
+      backup_one "$path"
     fi
   done < <(cfg ls-tree -r --name-only "$BRANCH")
-  [ "$moved" -eq 0 ] || echo "  backed up $moved existing file(s) to $BACKUP_DIR/"
+  if [ "$moved" -gt 0 ]; then
+    if [ "$DRY_RUN" -eq 1 ]; then echo "  would back up $moved path(s) to $BACKUP_DIR/"
+    else echo "  backed up $moved path(s) to $BACKUP_DIR/"; fi
+  fi
   # With an empty index, checking out the branch writes every tracked file.
   run git --git-dir="$GIT_DIR_CFG" --work-tree="$HOME" checkout "$BRANCH"
 fi
@@ -235,8 +278,10 @@ say "Oh My Zsh"
 ZSH_DIR="$HOME/.oh-my-zsh"
 if ! grep -q 'oh-my-zsh' "$HOME/.zshrc" 2>/dev/null && [ "$DRY_RUN" -eq 0 ]; then
   echo "  .zshrc does not use Oh My Zsh; skipped"
-elif [ -d "$ZSH_DIR" ]; then
+elif [ -f "$ZSH_DIR/oh-my-zsh.sh" ]; then
   echo "  already installed"
+elif [ -d "$ZSH_DIR" ]; then
+  warn "$ZSH_DIR exists but has no oh-my-zsh.sh (a broken install); move it aside and re-run"
 elif [ "$SKIP_NETWORK" = 1 ]; then
   echo "  missing; skipped (--skip-network)"
 else
@@ -244,9 +289,12 @@ else
   # shellcheck disable=SC2016  # printed literally, not expanded
   printf '  + RUNZSH=no CHSH=no KEEP_ZSHRC=yes sh -c "$(curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh)" "" --unattended\n'
   if [ "$DRY_RUN" -eq 0 ]; then
-    RUNZSH=no CHSH=no KEEP_ZSHRC=yes sh -c \
-      "$(curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh)" "" --unattended \
-      || warn "Oh My Zsh install failed"
+    if omz_installer="$(curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh)"; then
+      RUNZSH=no CHSH=no KEEP_ZSHRC=yes sh -c "$omz_installer" "" --unattended </dev/null \
+        || warn "Oh My Zsh install failed"
+    else
+      warn "could not download the Oh My Zsh installer"
+    fi
   fi
 fi
 
@@ -265,6 +313,10 @@ do
   dest="$ZSH_CUSTOM_DIR/plugins/$name"
   if [ -d "$dest" ]; then
     echo "  $name: already present"
+  elif [ "$DRY_RUN" -eq 0 ] && [ ! -f "$ZSH_DIR/oh-my-zsh.sh" ]; then
+    # Cloning into a missing Oh My Zsh would create ~/.oh-my-zsh, and the
+    # installer refuses to run over an existing directory on the next try.
+    echo "  $name: skipped (Oh My Zsh is not installed)"
   elif [ "$SKIP_NETWORK" = 1 ]; then
     echo "  $name: missing; skipped (--skip-network)"
   else
