@@ -4,6 +4,7 @@
 # Dotfiles
 !.gitignore
 !.zshrc
+!.zshenv
 !.zprofile
 !.bashrc
 !.gitconfig
