@@ -9,10 +9,11 @@ always-on **server**.
 On a new Mac, run one line. It uses HTTPS, so no SSH key is needed yet:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/cammace/dotfiles/main/bootstrap.sh | bash -s -- --role server
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/cammace/dotfiles/main/bootstrap.sh)" bootstrap --role server
 ```
 
-Use `--role laptop` for a laptop. `bootstrap.sh` is idempotent, so a re-run is safe. In order, it:
+Use `--role laptop` for a laptop. Run it from a terminal session (local, Screen Sharing or `ssh -t`): the
+Homebrew installer asks for your password. `bootstrap.sh` is idempotent, so a re-run is safe. In order, it:
 
 1. Installs the Xcode Command Line Tools if they are missing.
 2. Installs Homebrew if it is missing and loads `brew shellenv`.
@@ -40,7 +41,7 @@ Flags:
 To run a branch before it is merged, fetch the script from that branch and pass the same branch:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/cammace/dotfiles/BRANCH/bootstrap.sh | bash -s -- --role server --branch BRANCH
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/cammace/dotfiles/BRANCH/bootstrap.sh)" bootstrap --role server --branch BRANCH
 ```
 
 ### Server only

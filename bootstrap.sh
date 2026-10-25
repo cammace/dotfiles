@@ -2,8 +2,12 @@
 # bootstrap.sh - set up a Mac from this dotfiles repo. Idempotent: safe to re-run.
 #
 # New Mac (HTTPS, no SSH key needed):
-#   curl -fsSL https://raw.githubusercontent.com/cammace/dotfiles/main/bootstrap.sh \
-#     | bash -s -- --role server
+#   bash -c "$(curl -fsSL https://raw.githubusercontent.com/cammace/dotfiles/main/bootstrap.sh)" \
+#     bootstrap --role server
+#
+# Prefer that form to `curl ... | bash`: it keeps stdin on the terminal, so the
+# Homebrew installer and cask installs can ask for the sudo password. Under a
+# pipe, the in_tty helper below reattaches them to /dev/tty instead.
 #
 # Usage: bootstrap.sh [--role laptop|server] [--dry-run] [--branch NAME]
 #                     [--repo URL|PATH] [--skip-network]
@@ -52,9 +56,27 @@ run() {
   "$@"
 }
 
+# Run a command that may prompt (sudo password) with stdin on the terminal.
+# Under `curl | bash` stdin is the script itself: an installer reading it would
+# swallow the rest of this file, and Homebrew refuses sudo without a TTY.
+in_tty() {
+  if [ ! -t 0 ] && (: < /dev/tty) 2>/dev/null; then
+    "$@" < /dev/tty
+  else
+    "$@"
+  fi
+}
+
 cfg() { git --git-dir="$GIT_DIR_CFG" --work-tree="$HOME" "$@"; }
 
-usage() { sed -n '2,23p' "${BASH_SOURCE[0]:-$0}" 2>/dev/null | sed 's/^# \{0,1\}//'; }
+usage() {
+  # Under `bash -c` or a pipe there is no file to read the header from.
+  if [ -f "${BASH_SOURCE[0]:-}" ]; then
+    sed -n '2,29p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  else
+    echo "Usage: bootstrap.sh [--role laptop|server] [--dry-run] [--branch NAME] [--repo URL|PATH] [--skip-network]"
+  fi
+}
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -122,7 +144,7 @@ else
   # shellcheck disable=SC2016  # printed literally, not expanded
   printf '  + /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"\n'
   if [ "$DRY_RUN" -eq 0 ]; then
-    /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+    in_tty /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
   fi
 fi
 # The tracked .zprofile evals `brew shellenv` for login shells; this does the
@@ -203,7 +225,7 @@ else
       continue
     fi
     # One stale or App Store item must not abort the whole bootstrap.
-    run env HOMEBREW_BUNDLE_NO_UPGRADE=1 "$BREW" bundle --file="$bf" \
+    run in_tty env HOMEBREW_BUNDLE_NO_UPGRADE=1 "$BREW" bundle --file="$bf" \
       || warn "brew bundle --file=$bf reported failures; re-run after fixing them"
   done
 fi
