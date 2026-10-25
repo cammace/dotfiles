@@ -8,10 +8,4 @@ brew "ollama", restart_service: :changed
 # Port of OpenAI's Whisper model in C/C++
 brew "whisper.cpp"
 
-# --- Casks ---
-# App to build and share containerised applications and microservices
-cask "docker-desktop"  # unsure: needs a logged-in GUI session (auto-login); colima, below, runs headless
-
-# --- Not yet installed ---
-# Headless Docker alternative to Docker Desktop. Not installed anywhere yet.
-# brew "colima"  # unsure: pick colima or docker-desktop for the mini
+# Docker comes from OrbStack, in the common Brewfile.

@@ -37,8 +37,6 @@ cask "cleanmymac-cli"  # unsure: needed at all?
 cask "codexbar"
 # Allows switching between application windows
 cask "contexts", args: { appdir: "/Applications" }
-# App to build and share containerised applications and microservices
-cask "docker-desktop"  # unsure: thin-client laptop can drop this once the mini runs it
 cask "font-fira-code-nerd-font", args: { appdir: "/Applications" }
 cask "font-hack-nerd-font", args: { appdir: "/Applications" }
 cask "font-jetbrains-mono-nerd-font"
@@ -194,6 +192,7 @@ uv "it2"  # iTerm2 CLI
 uv "phone-harness"  # unsure: iPhone Mirroring needs the laptop; adb mode works anywhere
 
 # --- Stale (from the 04-05 Brewfile, flagged for review) ---
+# cask "docker-desktop"  # REPLACED by OrbStack (Brewfile). Still installed on the MacBook; uninstall by hand once OrbStack has your images and volumes
 # cask "dbeaver-community"  # STALE: listed 04-05, not installed
 # cask "qlmarkdown"  # STALE: listed 04-05, not installed
 # mas "CardPointers", id: 1472875808  # STALE: listed 04-05, not installed

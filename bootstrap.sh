@@ -300,6 +300,26 @@ else
   done
 fi
 
+# --- 7b. OrbStack (Docker on both roles) --------------------------------------
+# The orbstack cask is in the common Brewfile. Its first start installs the
+# Docker socket and CLI links (it may ask for the admin password) and switches
+# the docker context to `orbstack`. It also adds one `source
+# ~/.orbstack/shell/init.zsh` line to .zprofile, which the repo already tracks.
+# The perl alarm stops a first start that waits on a GUI prompt nobody sees.
+say "OrbStack"
+if [ "$SKIP_NETWORK" = 1 ]; then
+  echo "  skipped (--skip-network)"
+elif [ "$DRY_RUN" -eq 1 ]; then
+  echo "  + orbctl start"
+elif ! command -v orbctl >/dev/null 2>&1; then
+  warn "orbctl not found: the orbstack cask did not install; check the brew bundle output above"
+elif orbctl status 2>/dev/null | grep -qi '^running'; then
+  echo "  already running"
+else
+  run in_tty perl -e 'alarm 300; exec @ARGV' orbctl start \
+    || warn "orbctl start failed or took over 5 min; open OrbStack once (Screen Sharing) to finish its setup"
+fi
+
 # --- 8. Oh My Zsh, its custom plugins, TPM -----------------------------------
 say "Oh My Zsh"
 ZSH_DIR="$HOME/.oh-my-zsh"
@@ -410,7 +430,11 @@ if [ "$ROLE" = server ]; then
   cat <<EOF
   5. Server settings (sleep, auto-restart, wake on LAN, Remote Login, Screen
      Sharing, hostname). Read it first, then:  sudo ~/macos-server.sh <hostname>
-  6. Open a new shell (exec zsh -l) so the role switch takes effect.
+  6. OrbStack, Ollama and every LaunchAgent run only inside a logged-in user
+     session. For them to come back after a power cut, turn on automatic login
+     (System Settings > Users & Groups; needs FileVault off). OrbStack cannot
+     update itself without its GUI: brew upgrade --greedy orbstack
+  7. Open a new shell (exec zsh -l) so the role switch takes effect.
 EOF
 else
   echo "  5. Open a new shell (exec zsh -l)."

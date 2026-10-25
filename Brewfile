@@ -51,6 +51,8 @@ brew "direnv"
 brew "docker"
 # Isolated development environments using Docker
 brew "docker-compose"
+# Docker CLI plugin for extended build capabilities with BuildKit
+brew "docker-buildx"
 # Modern, maintained replacement for ls
 brew "eza"
 # Simple, fast and user-friendly alternative to find
@@ -180,6 +182,9 @@ brew "oven-sh/bun/bun", trusted: true
 brew "uv"  # NEW: the laptop has uv from the standalone installer in ~/.local/bin
 
 # --- Casks ---
+# Docker engine for both Macs (replaces Docker Desktop). It sets the docker
+# context to `orbstack`; bootstrap.sh starts it once after this bundle.
+cask "orbstack"
 # Password manager that keeps all passwords secure behind one password
 cask "1password", args: { appdir: "/Applications" }
 # Command-line interface for 1Password

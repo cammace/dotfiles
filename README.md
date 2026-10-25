@@ -61,6 +61,20 @@ sudo ~/macos-server.sh <hostname>     # add --dry-run to preview
 It turns off system and disk sleep, restarts after a power failure, wakes on network access, and turns on
 Remote Login and Screen Sharing. With a hostname, it also sets the computer name.
 
+## Docker (OrbStack)
+
+Both Macs run Docker through [OrbStack](https://orbstack.dev), from the common `Brewfile`. Docker Desktop is no
+longer in any Brewfile. After `brew bundle`, `bootstrap.sh` runs `orbctl start` once. That first start installs the
+Docker socket and CLI links (it may ask for the admin password) and sets the `docker` context to `orbstack`.
+The Homebrew `docker`, `docker-compose` and `docker-buildx` CLIs talk to it through that context.
+
+On the headless server:
+- OrbStack runs inside a logged-in user session, like every LaunchAgent. To come back after a power cut,
+  the server needs automatic login (which needs FileVault off).
+- OrbStack cannot update itself without its GUI. Update it with `brew upgrade --greedy orbstack`.
+- Settings live in `orb config` (for example `orb config set memory_mib 16384`); they are per machine and
+  not tracked.
+
 ## Machine role
 
 `~/.config/machine-role` holds `laptop` or `server`. It is not tracked. A missing file means `laptop`, so a
@@ -84,9 +98,9 @@ To change the role, run `bootstrap.sh --role <role>` again, or edit the file and
 
 | File | Contents |
 |---|---|
-| `Brewfile` | Common to both roles, including everything `.zshrc` runs at startup. |
+| `Brewfile` | Common to both roles, including everything `.zshrc` runs at startup and OrbStack (Docker). |
 | `Brewfile.laptop` | GUI apps, portable-only tools, App Store apps, VS Code extensions. |
-| `Brewfile.server` | The server's extras: Ollama, whisper.cpp, Docker. |
+| `Brewfile.server` | The server's extras: Ollama, whisper.cpp. |
 
 `# unsure:` marks an item whose placement still needs a decision. `# STALE` lines were in the old Brewfile but
 are not installed; they stay commented out until someone decides. To refresh after installing something:
@@ -104,7 +118,7 @@ brew bundle dump --file=/tmp/Brewfile.current   # then move new lines into the r
 | `Brewfile`, `Brewfile.laptop`, `Brewfile.server` | Homebrew packages, casks, App Store apps, split by role |
 | `.zshrc` | Oh My Zsh + Starship prompt, Nord theme, fzf-tab, machine-role switch, lazy API key loading (`load-ai-keys`) |
 | `.zshenv` | Every zsh: `~/.local/bin` on `PATH`; on a server, Homebrew too |
-| `.zprofile` | Login-shell `PATH`: Homebrew, Docker Desktop, JetBrains Toolbox, Obsidian, `~/.local/bin` |
+| `.zprofile` | Login-shell `PATH`: Homebrew, OrbStack, Docker Desktop (if present), JetBrains Toolbox, Obsidian, `~/.local/bin` |
 | `.bashrc` | fzf for bash |
 | `.tmux.conf` | tmux with TPM, Nord theme, Resurrect/Continuum session persistence |
 | `tmux_picker.sh` | Interactive Nord-themed tmux session picker; runs on SSH login |
