@@ -23,11 +23,13 @@ Homebrew installer asks for your password. `bootstrap.sh` is idempotent, so a re
 4. Checks out the repo. Existing files that the repo tracks move to `~/.cfg-backup/<timestamp>/` first.
    A re-run leaves an existing checkout alone.
 5. Sets `status.showUntrackedFiles no`.
-6. Writes the role to `~/.config/machine-role`.
+6. Writes the role to `~/.config/machine-role`. On a server, it also writes `~/.config/git/local.gitconfig`
+   once (see Machine role).
 7. Runs `brew bundle` for `Brewfile`, then `Brewfile.<role>`. A failed item prints a warning and does
    not stop the run.
 8. Installs Oh My Zsh (keeping the tracked `.zshrc`), the custom zsh plugins `.zshrc` loads, and TPM.
-9. Prints the manual next steps: 1Password and its SSH agent, `gh auth login`, `tailscale up`, and the
+9. Starts `zsh -i` once and reports anything it prints on stderr (real runs only).
+10. Prints the manual next steps: 1Password and its SSH agent, `gh auth login`, `tailscale up`, and the
    Clio repo's `ops/bootstrap.sh`.
 
 Flags:
@@ -69,6 +71,9 @@ Mac without the file behaves exactly as the laptop always has.
 | `~/.clio/env` sourced at shell start (runs `op read` for secrets) | yes | no: `~/.clio/bin` goes on `PATH`, and `load-clio-env` loads the rest on demand |
 | `SSH_AUTH_SOCK` points at the 1Password agent | always | only once 1Password has created the socket |
 | `update_ha_power.sh` reports battery power to Home Assistant | yes | exits at once |
+| `TERM` with no terminfo entry (Ghostty over SSH sends `xterm-ghostty`) | unchanged | falls back to `xterm-256color` |
+| Non-login zsh (`ssh host cmd`) gets Homebrew on `PATH` from `.zshenv` | no change | yes |
+| `~/.config/git/local.gitconfig` (untracked, included last by `.gitconfig`) | none | written once by bootstrap: `core.editor = nano` |
 
 The server skips the `op read` calls because, on a headless Mac, they raise permission prompts that nobody
 can answer, and a locked 1Password stalls every new shell.
@@ -98,11 +103,12 @@ brew bundle dump --file=/tmp/Brewfile.current   # then move new lines into the r
 | `macos-server.sh` | Sudo-only settings for the headless server; run by hand |
 | `Brewfile`, `Brewfile.laptop`, `Brewfile.server` | Homebrew packages, casks, App Store apps, split by role |
 | `.zshrc` | Oh My Zsh + Starship prompt, Nord theme, fzf-tab, machine-role switch, lazy API key loading (`load-ai-keys`) |
+| `.zshenv` | Every zsh: `~/.local/bin` on `PATH`; on a server, Homebrew too |
 | `.zprofile` | Login-shell `PATH`: Homebrew, Docker Desktop, JetBrains Toolbox, Obsidian, `~/.local/bin` |
 | `.bashrc` | fzf for bash |
 | `.tmux.conf` | tmux with TPM, Nord theme, Resurrect/Continuum session persistence |
 | `tmux_picker.sh` | Interactive Nord-themed tmux session picker; runs on SSH login |
-| `.gitconfig` | Git config with 1Password SSH commit signing |
+| `.gitconfig` | Git config with 1Password SSH commit signing; includes `~/.config/git/local.gitconfig` last |
 | `.gitignore` | Ignores everything except the allowlisted files above |
 | `.config/starship.toml` | Starship prompt with full Nord palette |
 | `.config/bat/config` | bat (cat replacement) with Nord theme |
