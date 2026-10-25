@@ -1,5 +1,13 @@
 #!/bin/bash
 
+# Laptop only: this reports MacBook battery power. ~/.config/machine-role is
+# written by bootstrap.sh; a missing file means laptop.
+role=laptop
+if [ -r "$HOME/.config/machine-role" ]; then
+    role=$(tr -d '[:space:]' < "$HOME/.config/machine-role")
+fi
+[ "$role" = server ] && exit 0
+
 # --- CRON FIX: SET PATH ---
 # This line is critical. It tells cron where to find commands like 'route', 'arp', and 'system_profiler'
 export PATH=/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
@@ -30,7 +38,7 @@ if [ -z "$raw_watts" ]; then
     watts=0
 else
     # Convert milliwatts to Watts
-    watts=$(echo $raw_watts | awk '{print $1/1000}')
+    watts=$(echo "$raw_watts" | awk '{print $1/1000}')
 fi
 
 # --- LOGIC ENGINE ---

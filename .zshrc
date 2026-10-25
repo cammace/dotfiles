@@ -65,8 +65,23 @@ else
     export EDITOR="nano"
 fi
 
+# Machine role: "laptop" or "server", read from the untracked
+# ~/.config/machine-role that bootstrap.sh writes. A missing or unreadable file
+# means laptop, so the MacBook behaves exactly as it did before the switch.
+# Not exported: scripts that care (update_ha_power.sh) read the file themselves.
+MACHINE_ROLE=laptop
+[[ -r "$HOME/.config/machine-role" ]] && MACHINE_ROLE="$(<"$HOME/.config/machine-role")"
+MACHINE_ROLE="${MACHINE_ROLE//[[:space:]]/}"
+[[ "$MACHINE_ROLE" == server ]] || MACHINE_ROLE=laptop
+
 # 1Password SSH agent (needed for git commit signing via op-ssh-sign)
-export SSH_AUTH_SOCK=~/Library/Group\ Containers/2BUA8C4S2C.com.1password/t/agent.sock
+# On a headless server, point at the agent only once 1Password has created its
+# socket; until then keep the system agent so SSH still works.
+if [[ "$MACHINE_ROLE" == laptop ]]; then
+  export SSH_AUTH_SOCK=~/Library/Group\ Containers/2BUA8C4S2C.com.1password/t/agent.sock
+elif [[ -S ~/Library/Group\ Containers/2BUA8C4S2C.com.1password/t/agent.sock ]]; then
+  export SSH_AUTH_SOCK=~/Library/Group\ Containers/2BUA8C4S2C.com.1password/t/agent.sock
+fi
 
 # Self-heal evalcache: purge any cached init script that `source`s a file which
 # no longer exists (e.g. an old versioned Cellar path left behind by a brew
@@ -249,7 +264,7 @@ export PATH="$(ruby -e 'puts Gem.default_bindir'):$PATH"
 export PATH="/opt/homebrew/opt/libpq/bin:$PATH"
 
 # Added by Antigravity
-export PATH="/Users/cameron/.antigravity/antigravity/bin:$PATH"
+export PATH="$HOME/.antigravity/antigravity/bin:$PATH"
 
 
 export CLAUDE_CODE_THEME=dark
@@ -271,14 +286,23 @@ _evalcache zoxide init --cmd cd zsh
 [[ -f "$HOME/.config/zsh/claude-tab-identity.zsh" ]] && source "$HOME/.config/zsh/claude-tab-identity.zsh"
 
 # # OpenClaw Completion
-# source "/Users/cameron/.openclaw/completions/openclaw.zsh"
+# source "$HOME/.openclaw/completions/openclaw.zsh"
 
 # opencode
-export PATH=/Users/cameron/.opencode/bin:$PATH
+export PATH=$HOME/.opencode/bin:$PATH
 alias opencode='~/.config/opencode/launch.sh --auto'
 
 # Clio env (managed by setup/bootstrap.sh — safe to remove)
-[ -f "$HOME/.clio/env" ] && source "$HOME/.clio/env"
+# It runs `op read` for several secrets as it is sourced. On a headless server
+# that raises macOS permission prompts nobody can answer, and a locked
+# 1Password stalls every new shell, so the server only gets Clio's bin dir and
+# loads the rest on demand with `load-clio-env`.
+if [[ "$MACHINE_ROLE" == laptop ]]; then
+  [ -f "$HOME/.clio/env" ] && source "$HOME/.clio/env"
+else
+  [[ -d "$HOME/.clio/bin" ]] && export PATH="$HOME/.clio/bin:$PATH"
+  load-clio-env() { [ -f "$HOME/.clio/env" ] && source "$HOME/.clio/env"; }
+fi
 
 export GOOGLE_SERVICE_ACCOUNT_KEY="$HOME/.config/commhospital/sa-key.json"
 # Hermes Agent — ensure ~/.local/bin is on PATH
