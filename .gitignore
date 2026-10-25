@@ -18,6 +18,8 @@
 !.config/git/ignore
 !.config/gh/
 !.config/gh/config.yml
+!.config/ghostty/
+!.config/ghostty/config
 
 # Claude Code
 !.claude/

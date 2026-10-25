@@ -1,0 +1,52 @@
+# Theme
+theme = nord
+
+# Font
+font-size = 14
+
+# macOS: left Option = Alt (for word nav), right Option = Unicode input
+macos-option-as-alt = left
+
+# Tabs in titlebar (like iTerm2)
+macos-titlebar-style = tabs
+
+# Quick terminal (like iTerm2 hotkey window) — Option+Space
+keybind = global:alt+space=toggle_quick_terminal
+quick-terminal-position = top
+quick-terminal-animation-duration = 0.15
+
+# Word deletion keybindings (not default)
+keybind = alt+backspace=text:\x17
+keybind = alt+d=esc:d
+
+# Splits: defaults already match iTerm2
+#   Cmd+D        = split right
+#   Cmd+Shift+D  = split down
+#   Cmd+[ / ]    = navigate splits
+#   Cmd+Shift+Enter = zoom/unzoom split
+
+# Dim unfocused splits (like iTerm2)
+unfocused-split-opacity = 0.85
+focus-follows-mouse = true
+
+# Copy on select
+copy-on-select = clipboard
+
+# Scrollback
+scrollback-limit = 10000000
+
+# Restore session on relaunch
+window-save-state = always
+
+# Working directory inheritance
+window-inherit-working-directory = true
+
+# Warn before closing pane with running process
+confirm-close-surface = true
+
+# Quit behavior
+quit-after-last-window-closed = true
+quit-after-last-window-closed-delay = 10s
+
+# Mouse hides while typing
+mouse-hide-while-typing = true
