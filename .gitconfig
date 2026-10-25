@@ -45,3 +45,8 @@
 	path = ~/.gitconfig-work
 [includeIf "hasconfig:remote.*.url:https://*@github.com/commhospital/**"]
 	path = ~/.gitconfig-work
+# Machine-local overrides, last so they win. Untracked; bootstrap.sh writes a
+# server version (editor). git skips a missing include, so a Mac without the
+# file behaves as before.
+[include]
+	path = ~/.config/git/local.gitconfig

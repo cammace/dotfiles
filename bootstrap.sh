@@ -42,6 +42,7 @@ SKIP_NETWORK="${DOTFILES_SKIP_NETWORK:-0}"
 
 GIT_DIR_CFG="$HOME/.cfg"
 ROLE_FILE="$HOME/.config/machine-role"
+LOCAL_GITCONFIG="$HOME/.config/git/local.gitconfig"
 STAMP="$(date +%Y%m%d-%H%M%S)"
 BACKUP_DIR="$HOME/.cfg-backup/$STAMP"
 WARNINGS=""
@@ -257,6 +258,31 @@ else
   [ "$DRY_RUN" -eq 1 ] || printf '%s\n' "$ROLE" > "$ROLE_FILE"
 fi
 
+# --- 6b. Machine-local git overrides ----------------------------------------
+# .gitconfig ends with an include of this untracked file. The tracked editor
+# (zed --wait) does not exist on a headless server, so the server gets nano.
+# Never overwritten: once it exists it is the machine's to edit.
+say "Machine-local git config ($LOCAL_GITCONFIG)"
+if [ -e "$LOCAL_GITCONFIG" ]; then
+  echo "  already present; leaving it alone"
+elif [ "$ROLE" = server ]; then
+  run mkdir -p "$(dirname "$LOCAL_GITCONFIG")"
+  printf '  + write %s (core.editor = nano)\n' "$LOCAL_GITCONFIG"
+  if [ "$DRY_RUN" -eq 0 ]; then
+    cat > "$LOCAL_GITCONFIG" <<'GITCONFIG'
+# Machine-local git overrides for this server. Written once by bootstrap.sh;
+# not tracked, never overwritten. Included last from ~/.gitconfig.
+[core]
+	editor = nano
+# Commit signing still goes through the 1Password app (op-ssh-sign), which
+# stalls while 1Password is locked. To sign with an on-disk key instead, add
+# a [user] signingkey and a [gpg "ssh"] program here.
+GITCONFIG
+  fi
+else
+  echo "  none needed for $ROLE"
+fi
+
 # --- 7. Homebrew bundle ------------------------------------------------------
 say "brew bundle (Brewfile, Brewfile.$ROLE)"
 if [ "$SKIP_NETWORK" = 1 ]; then
@@ -339,7 +365,30 @@ else
   fi
 fi
 
-# --- 9. Manual next steps ----------------------------------------------------
+# --- 9. Shell smoke test -----------------------------------------------------
+# Start the shell the way a new terminal would and report anything it prints
+# on stderr. SSH_CONNECTION and TMUX are dropped so the SSH-login tmux picker
+# stays out of it; perl's alarm caps a hang (a wedged op read, say) at 60 s.
+say "Shell smoke test (zsh -i)"
+if [ "$DRY_RUN" -eq 1 ] || [ "$SKIP_NETWORK" = 1 ]; then
+  echo "  skipped ($([ "$DRY_RUN" -eq 1 ] && echo dry run || echo --skip-network): the shell needs the installs above)"
+elif ! command -v zsh >/dev/null 2>&1; then
+  warn "zsh not found; skipped the shell smoke test"
+else
+  smoke_rc=0
+  smoke_err="$(env -u SSH_CONNECTION -u TMUX perl -e 'alarm 60; exec @ARGV' \
+    zsh -i -c 'exit 0' 2>&1 >/dev/null </dev/null)" || smoke_rc=$?
+  # A shell with no terminal always says this about zle; it is not an error.
+  smoke_err="$(printf '%s\n' "$smoke_err" | grep -v "can't change option: zle" | sed '/^$/d' || true)"
+  if [ "$smoke_rc" -eq 0 ] && [ -z "$smoke_err" ]; then
+    echo "  ok: a new zsh starts cleanly"
+  else
+    warn "a new zsh exited $smoke_rc or printed errors; first lines:
+$(printf '%s\n' "$smoke_err" | head -10 | sed 's/^/      /')"
+  fi
+fi
+
+# --- 10. Manual next steps ---------------------------------------------------
 say "Done$([ "$DRY_RUN" -eq 1 ] && echo ' (dry run: nothing was changed)')"
 if [ -n "$WARNINGS" ]; then
   printf '\nWarnings:\n%s' "$WARNINGS"
