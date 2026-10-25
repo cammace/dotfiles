@@ -1,3 +1,20 @@
+# Machine role: "laptop" or "server", read from the untracked
+# ~/.config/machine-role that bootstrap.sh writes. A missing or unreadable file
+# means laptop, so the MacBook behaves exactly as it did before the switch.
+# Not exported: scripts that care (update_ha_power.sh) read the file themselves.
+# Read first, before Oh My Zsh, so the TERM fallback below runs ahead of zle.
+MACHINE_ROLE=laptop
+[[ -r "$HOME/.config/machine-role" ]] && MACHINE_ROLE="$(<"$HOME/.config/machine-role")"
+MACHINE_ROLE="${MACHINE_ROLE//[[:space:]]/}"
+[[ "$MACHINE_ROLE" == server ]] || MACHINE_ROLE=laptop
+
+# Server: an SSH session from Ghostty (or kitty, etc.) arrives with a TERM such
+# as xterm-ghostty that this Mac has no terminfo for, which breaks zle, less and
+# tmux. Fall back to xterm-256color only when the entry is missing.
+if [[ "$MACHINE_ROLE" == server && -n "$TERM" ]] && ! infocmp "$TERM" >/dev/null 2>&1; then
+  export TERM=xterm-256color
+fi
+
 ###
 # START OMZ CONFIG
 ###
@@ -64,15 +81,6 @@ elif command -v zed &>/dev/null; then
 else
     export EDITOR="nano"
 fi
-
-# Machine role: "laptop" or "server", read from the untracked
-# ~/.config/machine-role that bootstrap.sh writes. A missing or unreadable file
-# means laptop, so the MacBook behaves exactly as it did before the switch.
-# Not exported: scripts that care (update_ha_power.sh) read the file themselves.
-MACHINE_ROLE=laptop
-[[ -r "$HOME/.config/machine-role" ]] && MACHINE_ROLE="$(<"$HOME/.config/machine-role")"
-MACHINE_ROLE="${MACHINE_ROLE//[[:space:]]/}"
-[[ "$MACHINE_ROLE" == server ]] || MACHINE_ROLE=laptop
 
 # 1Password SSH agent (needed for git commit signing via op-ssh-sign)
 # On a headless server, point at the agent only once 1Password has created its
