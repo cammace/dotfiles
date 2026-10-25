@@ -223,7 +223,7 @@ npm "typescript"
 # --- Stale (from the 04-05 Brewfile, flagged for review) ---
 # tap "1password/tap"  # STALE: no installed item uses it
 # brew "aider"  # STALE: listed 04-05, not installed
-# brew "pnpm"  # STALE: listed 04-05, not installed (corepack, below, provides pnpm)
+# brew "pnpm"  # STALE: listed 04-05, not installed (the corepack npm global provides pnpm)
 # brew "python@3.10"  # STALE: not installed; deprecated upstream
 # brew "tldr"  # STALE: not installed; disabled in Homebrew (tlrc replaces it)
 # brew "zsh-autosuggestions"  # STALE: not installed; Oh My Zsh custom plugin supplies it (bootstrap.sh clones it)
