@@ -14,6 +14,7 @@
 # Every step is idempotent, so a re-run is safe.
 set -euo pipefail
 
+ARGS="$*"
 DRY_RUN=0
 NAME=""
 while [ $# -gt 0 ]; do
@@ -27,7 +28,7 @@ done
 
 [ "$(uname -s)" = Darwin ] || { echo "macOS only" >&2; exit 1; }
 if [ "$DRY_RUN" -eq 0 ] && [ "$(id -u)" -ne 0 ]; then
-  echo "run with sudo: sudo $0 $*" >&2
+  echo "run with sudo: sudo $0 $ARGS" >&2
   exit 1
 fi
 
@@ -44,11 +45,19 @@ run pmset -a autorestart 1
 run pmset -a womp 1
 
 echo "==> Remote Login (SSH)"
-# systemsetup needs Full Disk Access for the terminal on recent macOS; fall
-# back to launchctl, which does not.
-if ! run systemsetup -f -setremotelogin on; then
-  run launchctl enable system/com.openssh.sshd
-  run launchctl bootstrap system /System/Library/LaunchDaemons/ssh.plist || true
+# systemsetup needs Full Disk Access for the terminal on recent macOS, and it
+# can print that error yet exit 0. So always run the launchctl path too (it
+# needs no Full Disk Access), then check the result.
+run systemsetup -f -setremotelogin on || true
+run launchctl enable system/com.openssh.sshd
+# bootstrap fails when sshd is already loaded; that is fine.
+run launchctl bootstrap system /System/Library/LaunchDaemons/ssh.plist 2>/dev/null || true
+if [ "$DRY_RUN" -eq 0 ]; then
+  if launchctl print system/com.openssh.sshd >/dev/null 2>&1; then
+    echo "  Remote Login: on (com.openssh.sshd is loaded)"
+  else
+    echo "  WARNING: Remote Login still looks off. Turn it on in System Settings > General > Sharing." >&2
+  fi
 fi
 
 echo "==> Screen Sharing"
