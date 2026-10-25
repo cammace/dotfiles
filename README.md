@@ -73,7 +73,7 @@ Mac without the file behaves exactly as the laptop always has.
 | `update_ha_power.sh` reports battery power to Home Assistant | yes | exits at once |
 | `TERM` with no terminfo entry (Ghostty over SSH sends `xterm-ghostty`) | unchanged | falls back to `xterm-256color` |
 | Non-login zsh (`ssh host cmd`) gets Homebrew on `PATH` from `.zshenv` | no change | yes |
-| `~/.config/git/local.gitconfig` (untracked, included last by `.gitconfig`) | none | written once by bootstrap: `core.editor = nano` |
+| `~/.config/git/local.gitconfig` (untracked, included last by `.gitconfig`, so it beats `git config --global`: edit this file instead) | none | written once by bootstrap: `core.editor = nano` |
 
 The server skips the `op read` calls because, on a headless Mac, they raise permission prompts that nobody
 can answer, and a locked 1Password stalls every new shell.

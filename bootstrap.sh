@@ -102,7 +102,7 @@ done
 case "$ROLE" in
   laptop|server) ;;
   "")
-    if [ -r "$ROLE_FILE" ]; then
+    if [ -f "$ROLE_FILE" ] && [ -r "$ROLE_FILE" ]; then
       ROLE="$(tr -d '[:space:]' < "$ROLE_FILE")"
       case "$ROLE" in laptop|server) ;; *) die "$ROLE_FILE holds '$ROLE'; pass --role laptop|server" ;; esac
     else
@@ -248,7 +248,7 @@ fi
 # --- 6. Machine role ---------------------------------------------------------
 say "Machine role ($ROLE_FILE)"
 current_role=""
-[ -r "$ROLE_FILE" ] && current_role="$(tr -d '[:space:]' < "$ROLE_FILE")"
+[ -f "$ROLE_FILE" ] && [ -r "$ROLE_FILE" ] && current_role="$(tr -d '[:space:]' < "$ROLE_FILE")"
 if [ "$current_role" = "$ROLE" ]; then
   echo "  already $ROLE"
 else
@@ -271,7 +271,8 @@ elif [ "$ROLE" = server ]; then
   if [ "$DRY_RUN" -eq 0 ]; then
     cat > "$LOCAL_GITCONFIG" <<'GITCONFIG'
 # Machine-local git overrides for this server. Written once by bootstrap.sh;
-# not tracked, never overwritten. Included last from ~/.gitconfig.
+# not tracked, never overwritten. Included last from ~/.gitconfig, so it wins
+# over `git config --global` writes too: change settings here, not there.
 [core]
 	editor = nano
 # Commit signing still goes through the 1Password app (op-ssh-sign), which
@@ -369,6 +370,8 @@ fi
 # Start the shell the way a new terminal would and report anything it prints
 # on stderr. SSH_CONNECTION and TMUX are dropped so the SSH-login tmux picker
 # stays out of it; perl's alarm caps a hang (a wedged op read, say) at 60 s.
+# stderr goes to a file, not a pipe: a child that outlives the killed zsh would
+# hold a pipe open and make the capture wait for it, defeating the cap.
 say "Shell smoke test (zsh -i)"
 if [ "$DRY_RUN" -eq 1 ] || [ "$SKIP_NETWORK" = 1 ]; then
   echo "  skipped ($([ "$DRY_RUN" -eq 1 ] && echo dry run || echo --skip-network): the shell needs the installs above)"
@@ -376,13 +379,15 @@ elif ! command -v zsh >/dev/null 2>&1; then
   warn "zsh not found; skipped the shell smoke test"
 else
   smoke_rc=0
-  smoke_err="$(env -u SSH_CONNECTION -u TMUX perl -e 'alarm 60; exec @ARGV' \
-    zsh -i -c 'exit 0' 2>&1 >/dev/null </dev/null)" || smoke_rc=$?
+  smoke_log="$(mktemp -t bootstrap-smoke)"
+  env -u SSH_CONNECTION -u TMUX perl -e 'alarm 60; exec @ARGV' \
+    zsh -i -c 'exit 0' >/dev/null 2>"$smoke_log" </dev/null || smoke_rc=$?
   # A shell with no terminal always says this about zle; it is not an error.
-  smoke_err="$(printf '%s\n' "$smoke_err" | grep -v "can't change option: zle" | sed '/^$/d' || true)"
+  smoke_err="$(grep -v "can't change option: zle" "$smoke_log" | sed '/^$/d' || true)"
   if [ "$smoke_rc" -eq 0 ] && [ -z "$smoke_err" ]; then
     echo "  ok: a new zsh starts cleanly"
   else
+    [ "$smoke_rc" -ne 14 ] || smoke_rc="14 (timed out after 60 s)"
     warn "a new zsh exited $smoke_rc or printed errors; first lines:
 $(printf '%s\n' "$smoke_err" | head -10 | sed 's/^/      /')"
   fi

@@ -4,7 +4,7 @@
 # Not exported: scripts that care (update_ha_power.sh) read the file themselves.
 # Read first, before Oh My Zsh, so the TERM fallback below runs ahead of zle.
 MACHINE_ROLE=laptop
-[[ -r "$HOME/.config/machine-role" ]] && MACHINE_ROLE="$(<"$HOME/.config/machine-role")"
+[[ -f "$HOME/.config/machine-role" && -r "$HOME/.config/machine-role" ]] && MACHINE_ROLE="$(<"$HOME/.config/machine-role")"
 MACHINE_ROLE="${MACHINE_ROLE//[[:space:]]/}"
 [[ "$MACHINE_ROLE" == server ]] || MACHINE_ROLE=laptop
 
