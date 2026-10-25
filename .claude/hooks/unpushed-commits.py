@@ -161,6 +161,11 @@ OPERATOR_ENV = "HOMELAB_OPERATOR_JUDGE"
 def main():
     if os.environ.get(OPERATOR_ENV) == "1":
         sys.exit(0)
+    # Slack bot turns (jobs/slack-bot sets CLIO_SURFACE=slack): the nag posted to
+    # Cam's phone as part of every reply, and a one-word "yes" there could push a
+    # peer session's commit. Cam chose 2026-10-04 to keep it terminal-only.
+    if os.environ.get("CLIO_SURFACE") == "slack":
+        sys.exit(0)
 
     try:
         payload = json.load(sys.stdin)
