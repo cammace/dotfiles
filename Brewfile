@@ -53,6 +53,8 @@ brew "docker"
 brew "docker-compose"
 # Docker CLI plugin for extended build capabilities with BuildKit
 brew "docker-buildx"
+# Platform keystore credential helper for Docker (credsStore: osxkeychain)
+brew "docker-credential-helper"
 # Modern, maintained replacement for ls
 brew "eza"
 # Simple, fast and user-friendly alternative to find
