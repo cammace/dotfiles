@@ -7,7 +7,7 @@
 # It sets:
 #   - power: never sleep (system and disk), restart after a power failure,
 #     wake on network access (Wake on LAN)
-#   - Remote Login (SSH) on
+#   - Remote Login (SSH) on, keys only (no password or keyboard-interactive)
 #   - Screen Sharing on
 #   - with <hostname>: ComputerName, HostName and LocalHostName
 #
@@ -60,10 +60,33 @@ if [ "$DRY_RUN" -eq 0 ]; then
   fi
 fi
 
+echo "==> SSH: keys only"
+# sshd keeps the first value it reads, so 000- loads before macOS's own
+# 100-macos.conf. macOS starts sshd per connection: the next login uses it.
+KEYS_ONLY=/etc/ssh/sshd_config.d/000-keys-only.conf
+if [ "$DRY_RUN" -eq 1 ]; then
+  echo "  + write $KEYS_ONLY (PasswordAuthentication no, KbdInteractiveAuthentication no)"
+elif [ -f "$KEYS_ONLY" ]; then
+  echo "  already present: $KEYS_ONLY"
+else
+  printf 'PasswordAuthentication no\nKbdInteractiveAuthentication no\n' > "$KEYS_ONLY"
+  if sshd -t; then
+    echo "  wrote $KEYS_ONLY"
+  else
+    rm -f "$KEYS_ONLY"
+    echo "  WARNING: sshd -t rejected $KEYS_ONLY; removed it, so password logins stay on." >&2
+  fi
+fi
+
 echo "==> Screen Sharing"
 run launchctl enable system/com.apple.screensharing
-# bootstrap fails when the service is already loaded; that is fine.
-run launchctl bootstrap system /System/Library/LaunchDaemons/com.apple.screensharing.plist || true
+# bootstrap fails with "5: Input/output error" when the service is already
+# loaded (always, while someone is connected), so skip it then.
+if launchctl print system/com.apple.screensharing >/dev/null 2>&1; then
+  echo "  already loaded"
+else
+  run launchctl bootstrap system /System/Library/LaunchDaemons/com.apple.screensharing.plist || true
+fi
 
 if [ -n "$NAME" ]; then
   echo "==> Hostname: $NAME"
