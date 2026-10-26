@@ -48,6 +48,7 @@
 # Bootstrap
 !bootstrap.sh
 !macos-server.sh
+!syncthing-setup.sh
 
 # Scripts
 !tmux_picker.sh

@@ -209,6 +209,8 @@ cask "tailscale-app"  # unsure: GUI app needs a login session on the mini; the t
 # apps too. Laptop-only and niche apps stay in Brewfile.laptop.
 # Sets the default browser; bootstrap.sh runs `defaultbrowser chrome`
 brew "defaultbrowser"
+# Private settings sync between the Macs (syncthing-setup.sh); runs as a login service
+brew "syncthing", start_service: true, restart_service: :changed
 # Display controls: scaling, HiDPI, brightness
 cask "betterdisplay"
 # Anthropic's desktop app

@@ -26,9 +26,9 @@
 # Steps, in order: Xcode Command Line Tools, Homebrew, bare clone into ~/.cfg,
 # checkout (conflicting files go to ~/.cfg-backup/<timestamp>/),
 # status.showUntrackedFiles=no, ~/.config/machine-role, brew bundle (Brewfile,
-# then Brewfile.<role>), OrbStack's first start, Claude Code, Chrome as the
-# default browser, iTerm2's settings folder, Oh My Zsh + custom plugins + TPM,
-# manual next steps.
+# then Brewfile.<role>), OrbStack's first start, Claude Code, Syncthing and
+# the private settings it links, Chrome as the default browser, iTerm2's
+# settings folder, Oh My Zsh + custom plugins + TPM, manual next steps.
 #
 # Sudo-only server settings live in macos-server.sh, which this never runs.
 #
@@ -349,16 +349,43 @@ else
   fi
 fi
 
-# --- 7d. Default browser and iTerm2 settings (both roles) --------------------
+# --- 7d. Syncthing: private settings sync (both roles) -----------------------
+# ~/Sync/mac-settings carries what this public repo must not: iTerm2's plist,
+# ~/.ssh/config, the .pub keys and private helper scripts. syncthing-setup.sh
+# turns off global discovery and relays, creates the folder, and links its
+# files into place. Pairing the two Macs is a manual step (Next steps); until
+# the first sync lands, the link and iTerm2 steps have nothing to work with.
+say "Syncthing (private settings)"
+st_setup="$HOME/syncthing-setup.sh"
+st_dry=""
+[ "$DRY_RUN" -eq 1 ] && st_dry=--dry-run
+if [ "$DRY_RUN" -eq 1 ] && [ ! -x "$st_setup" ]; then
+  echo "  + ~/syncthing-setup.sh; ~/syncthing-setup.sh link (after pairing)"
+elif ! command -v syncthing >/dev/null 2>&1 && [ "$DRY_RUN" -eq 0 ]; then
+  warn "syncthing not found (brew bundle); private settings will not sync"
+elif [ ! -x "$st_setup" ]; then
+  warn "$st_setup not found or not executable; check the dotfiles checkout"
+else
+  "$st_setup" ${st_dry:+"$st_dry"} \
+    || warn "syncthing-setup.sh failed; run it again once Syncthing is running"
+  if [ -d "$HOME/Sync/mac-settings/ssh" ] || [ -d "$HOME/Sync/mac-settings/bin" ]; then
+    "$st_setup" link ${st_dry:+"$st_dry"} \
+      || warn "syncthing-setup.sh link left files that differ from the synced copies (see above)"
+  else
+    echo "  nothing synced yet: pair the Macs (Next steps), then re-run"
+  fi
+fi
+
+# --- 7e. Default browser and iTerm2 settings (both roles) --------------------
 # Changing the default browser makes macOS show a "keep or change" dialog on the
 # Mac's own screen; somebody has to click it there. A re-run skips the dialog
 # once Chrome already handles https.
-# iTerm2 reads its settings from a private iCloud Drive folder, not from this
-# public repo: its plist carries host names, profile commands and window state.
+# iTerm2 reads its settings from the Syncthing folder, not from this public
+# repo: its plist carries host names, profile commands and window state.
 # The keys only stick while iTerm2 is not running, because a running iTerm2
 # rewrites its settings when it quits.
 say "Default browser and iTerm2 settings"
-ITERM_PREFS_DIR="$HOME/Library/Mobile Documents/com~apple~CloudDocs/Mac Settings/iTerm2"
+ITERM_PREFS_DIR="$HOME/Sync/mac-settings/iTerm2"
 if defaults read com.apple.LaunchServices/com.apple.launchservices.secure LSHandlers 2>/dev/null \
     | grep -B1 'LSHandlerURLScheme = https;' | grep -q 'com.google.chrome'; then
   echo "  Chrome is already the default browser"
@@ -373,11 +400,11 @@ else
 fi
 # shellcheck disable=SC2009  # pgrep -x missed a running iTerm2 in testing; ps sees it
 if [ "$(defaults read com.googlecode.iterm2 PrefsCustomFolder 2>/dev/null)" = "$ITERM_PREFS_DIR" ]; then
-  echo "  iTerm2 already loads its settings from iCloud Drive"
+  echo "  iTerm2 already loads its settings from $ITERM_PREFS_DIR"
 elif [ ! -f "$ITERM_PREFS_DIR/com.googlecode.iterm2.plist" ] && [ "$DRY_RUN" -eq 0 ]; then
-  warn "no iTerm2 settings at $ITERM_PREFS_DIR; sign in to iCloud Drive, let it sync, and re-run"
+  warn "no iTerm2 settings at $ITERM_PREFS_DIR yet; pair Syncthing (Next steps), let it sync, and re-run"
 elif ps -axco comm= | grep -qx iTerm2; then
-  warn "iTerm2 is running; quit it and re-run so it loads its settings from iCloud Drive"
+  warn "iTerm2 is running; quit it and re-run so it loads its settings from $ITERM_PREFS_DIR"
 else
   run defaults write com.googlecode.iterm2 PrefsCustomFolder -string "$ITERM_PREFS_DIR"
   run defaults write com.googlecode.iterm2 LoadPrefsFromCustomFolder -bool true
@@ -494,8 +521,13 @@ Next steps (manual):
   2. gh auth login
   3. tailscale up   (or sign in from the Tailscale app)
   4. Clone the Clio repo and run its ops/bootstrap.sh.
-  5. Sign in to your Apple ID with iCloud Drive on, and to the App Store app,
-     then re-run this script: the App Store apps and iTerm2's settings need them.
+  5. Pair Syncthing with your other Mac. On each Mac, with the other's ID:
+       ~/syncthing-setup.sh pair <other-device-id> [tcp://<tailnet-ip>:22000]
+     This Mac's ID: syncthing device-id. Once ~/Sync/mac-settings has synced,
+     re-run this script to link ~/.ssh/config and load iTerm2's settings.
+     Only one Mac should save iTerm2's settings: on the second Mac, set
+     iTerm2 > Settings > General > Settings > Save changes to Manually.
+     Sign in to the App Store app too; the App Store apps need it.
   6. App settings that sync through their own accounts, not this repo:
      - VS Code: Accounts > Backup and Sync Settings, with GitHub.
      - JetBrains Toolbox: install IntelliJ IDEA, DataGrip and Gateway, then
