@@ -178,6 +178,9 @@ else
   # A bare clone has no fetch refspec, so later fetches would not update
   # origin/* without this.
   run git --git-dir="$GIT_DIR_CFG" config remote.origin.fetch '+refs/heads/*:refs/remotes/origin/*'
+  # Nor does it set an upstream, so a plain `config pull` would refuse.
+  run git --git-dir="$GIT_DIR_CFG" fetch -q origin
+  run git --git-dir="$GIT_DIR_CFG" branch -q --set-upstream-to="origin/$BRANCH" "$BRANCH"
 fi
 
 # --- 4. Checkout, backing up conflicts first ---------------------------------
