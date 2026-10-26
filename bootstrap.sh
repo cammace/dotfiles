@@ -294,8 +294,12 @@ else
       warn "$bf not found; skipped"
       continue
     fi
-    # One stale or App Store item must not abort the whole bootstrap.
+    # One stale or App Store item must not abort the whole bootstrap. A first
+    # tap can fail Homebrew's cross-platform audit and then succeed when a
+    # formula re-taps it, so one failed pass gets one retry before it warns.
     run in_tty env HOMEBREW_BUNDLE_NO_UPGRADE=1 "$BREW" bundle --file="$bf" \
+      || { echo "  brew bundle reported failures; retrying once"
+           run in_tty env HOMEBREW_BUNDLE_NO_UPGRADE=1 "$BREW" bundle --file="$bf"; } \
       || warn "brew bundle --file=$bf reported failures; re-run after fixing them"
   done
 fi
@@ -400,7 +404,12 @@ elif ! command -v zsh >/dev/null 2>&1; then
 else
   smoke_rc=0
   smoke_log="$(mktemp -t bootstrap-smoke)"
-  env -u SSH_CONNECTION -u TMUX perl -e 'alarm 60; exec @ARGV' \
+  # TERM_PROGRAM is dropped so /etc/zshrc_Apple_Terminal stays quiet ("Saving
+  # session..."). The first shell fills evalcache, which reports each cache it
+  # writes on stderr, so a warm-up run goes first and its output is discarded.
+  env -u SSH_CONNECTION -u TMUX -u TERM_PROGRAM perl -e 'alarm 60; exec @ARGV' \
+    zsh -i -c 'exit 0' >/dev/null 2>&1 </dev/null || :
+  env -u SSH_CONNECTION -u TMUX -u TERM_PROGRAM perl -e 'alarm 60; exec @ARGV' \
     zsh -i -c 'exit 0' >/dev/null 2>"$smoke_log" </dev/null || smoke_rc=$?
   # A shell with no terminal always says this about zle; it is not an error.
   smoke_err="$(grep -v "can't change option: zle" "$smoke_log" | sed '/^$/d' || true)"
@@ -408,7 +417,8 @@ else
     echo "  ok: a new zsh starts cleanly"
   else
     [ "$smoke_rc" -ne 14 ] || smoke_rc="14 (timed out after 60 s)"
-    warn "a new zsh exited $smoke_rc or printed errors; first lines:
+    if [ "$smoke_rc" = 0 ]; then smoke_what="printed on stderr"; else smoke_what="exited $smoke_rc"; fi
+    warn "a new zsh $smoke_what; first lines:
 $(printf '%s\n' "$smoke_err" | head -10 | sed 's/^/      /')"
   fi
 fi
