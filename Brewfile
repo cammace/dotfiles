@@ -180,6 +180,23 @@ brew "oven-sh/bun/bun", trusted: true
 brew "uv"  # NEW: the laptop has uv from the standalone installer in ~/.local/bin
 
 # --- Casks ---
+# Desktop and dev apps on both Macs: the mini is used through Screen Sharing as a full Mac (2026-10-26)
+cask "font-fira-code-nerd-font", args: { appdir: "/Applications" }
+cask "font-hack-nerd-font", args: { appdir: "/Applications" }
+cask "font-jetbrains-mono-nerd-font"
+cask "font-monaspace", args: { appdir: "/Applications" }
+# Web browser
+cask "google-chrome", args: { appdir: "/Applications" }  # unsure: Viewer browser tests on the mini may want it
+# Terminal emulator as alternative to Apple's Terminal app
+cask "iterm2", args: { appdir: "/Applications" }
+# JetBrains tools manager
+cask "jetbrains-toolbox", args: { appdir: "/Applications" }  # unsure: Viewer dev on the mini over JetBrains Gateway would want it there too
+# Git client focusing on power and productivity
+cask "tower", args: { appdir: "/Applications" }
+# Open-source code editor
+cask "visual-studio-code", args: { appdir: "/Applications" }
+# Rust-based terminal
+cask "warp"  # unsure: still used beside Ghostty and iTerm2?
 # Docker engine for both Macs (replaces Docker Desktop). It sets the docker
 # context to `orbstack`; bootstrap.sh starts it once after this bundle.
 cask "orbstack"

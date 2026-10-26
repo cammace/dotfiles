@@ -37,23 +37,13 @@ cask "cleanmymac-cli"  # unsure: needed at all?
 cask "codexbar"
 # Allows switching between application windows
 cask "contexts", args: { appdir: "/Applications" }
-cask "font-fira-code-nerd-font", args: { appdir: "/Applications" }
-cask "font-hack-nerd-font", args: { appdir: "/Applications" }
-cask "font-jetbrains-mono-nerd-font"
-cask "font-monaspace", args: { appdir: "/Applications" }
 # Font manager
 cask "fontbase", args: { appdir: "/Applications" }
 # Terminal emulator that uses platform-native UI and GPU acceleration
 cask "ghostty"  # server needs only its terminfo; see REVIEW
-# Web browser
-cask "google-chrome", args: { appdir: "/Applications" }  # unsure: Viewer browser tests on the mini may want it
 cask "goplaces"  # unsure: what uses this?
 # Software-defined radio receiver powered by GNU Radio and Qt
 cask "gqrx", args: { appdir: "/Applications" }
-# Terminal emulator as alternative to Apple's Terminal app
-cask "iterm2", args: { appdir: "/Applications" }
-# JetBrains tools manager
-cask "jetbrains-toolbox", args: { appdir: "/Applications" }  # unsure: Viewer dev on the mini over JetBrains Gateway would want it there too
 # Extensible editor for OpenStreetMap
 cask "josm", args: { appdir: "/Applications" }
 # Local-first alternative to Logitech Options+ for HID++ devices
@@ -64,16 +54,10 @@ cask "replacicon", args: { appdir: "/Applications" }
 cask "setapp", args: { appdir: "/Applications" }
 # Music streaming service
 cask "spotify", args: { appdir: "/Applications" }
-# Git client focusing on power and productivity
-cask "tower", args: { appdir: "/Applications" }
 # Open-source BitTorrent client
 cask "transmission", args: { appdir: "/Applications" }
-# Open-source code editor
-cask "visual-studio-code", args: { appdir: "/Applications" }
 # Multimedia player
 cask "vlc"
-# Rust-based terminal
-cask "warp"  # unsure: still used beside Ghostty and iTerm2?
 # Video communication and virtual meeting platform
 cask "zoom", args: { appdir: "/Applications" }
 
