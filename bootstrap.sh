@@ -464,6 +464,7 @@ if [ "$ROLE" = server ]; then
   cat <<EOF
   5. Server settings (sleep, auto-restart, wake on LAN, Remote Login, Screen
      Sharing, hostname). Read it first, then:  sudo ~/macos-server.sh <hostname>
+     Then the per-user defaults, without sudo:  ~/macos-defaults.sh
   6. OrbStack, Ollama and every LaunchAgent run only inside a logged-in user
      session. For them to come back after a power cut, turn on automatic login
      (System Settings > Users & Groups; needs FileVault off). OrbStack cannot

@@ -9,7 +9,13 @@
 #     wake on network access (Wake on LAN)
 #   - Remote Login (SSH) on, keys only (no password or keyboard-interactive)
 #   - Screen Sharing on
+#   - restart after a system freeze
+#   - Software Update: download updates and install security responses on
+#     their own; macOS upgrades and App Store apps wait for a person
 #   - with <hostname>: ComputerName, HostName and LocalHostName
+#
+# Per-user defaults (screen saver, App Nap, Finder) live in macos-defaults.sh,
+# which runs without sudo.
 #
 # Every step is idempotent, so a re-run is safe.
 set -euo pipefail
@@ -87,6 +93,24 @@ if launchctl print system/com.apple.screensharing >/dev/null 2>&1; then
 else
   run launchctl bootstrap system /System/Library/LaunchDaemons/com.apple.screensharing.plist || true
 fi
+
+echo "==> Restart after a freeze"
+# systemsetup can print a Full Disk Access error and still exit 0 (see the
+# Remote Login block), so check the result instead of trusting the exit code.
+run systemsetup -setrestartfreeze on || true
+if [ "$DRY_RUN" -eq 0 ]; then
+  systemsetup -getrestartfreeze 2>/dev/null | grep -q 'On' \
+    || echo "  WARNING: restart after freeze still looks off (systemsetup needs Full Disk Access for the terminal)." >&2
+fi
+
+echo "==> Software Update: download and security responses automatic; macOS upgrades by hand"
+SU=/Library/Preferences/com.apple.SoftwareUpdate
+run defaults write "$SU" AutomaticCheckEnabled -bool true
+run defaults write "$SU" AutomaticDownload -bool true
+run defaults write "$SU" CriticalUpdateInstall -bool true
+run defaults write "$SU" ConfigDataInstall -bool true
+run defaults write "$SU" AutomaticallyInstallMacOSUpdates -bool false
+run defaults write /Library/Preferences/com.apple.commerce AutoUpdate -bool false
 
 if [ -n "$NAME" ]; then
   echo "==> Hostname: $NAME"
