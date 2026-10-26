@@ -29,8 +29,6 @@ brew "autojump"  # unsure: stale? zoxide replaces it and .zshrc never loads auto
 brew "automake"
 # Official Amazon AWS command-line interface
 brew "awscli"
-# Microsoft Azure CLI 2.0
-brew "azure-cli"
 # C library implementing the SSH2 protocol
 brew "libssh2"
 # Clone of cat(1) with syntax highlighting and Git integration
@@ -171,8 +169,6 @@ brew "vhs"
 brew "watch"
 # ISO9660+RR manipulation tool
 brew "xorriso"
-# JavaScript package manager
-brew "yarn"
 # Shell extension to navigate your filesystem faster
 brew "zoxide"
 brew "hudochenkov/sshpass/sshpass", trusted: true
@@ -191,6 +187,8 @@ cask "orbstack"
 cask "1password", args: { appdir: "/Applications" }
 # Command-line interface for 1Password
 cask "1password-cli"
+# Microsoft Azure CLI (Homebrew moved it from a formula to a cask)
+cask "azure-cli"
 # OpenAI's coding agent that runs in your terminal
 cask "codex"
 # Brings the power of Copilot coding agent directly to your terminal
@@ -231,6 +229,7 @@ npm "typescript"
 # tap "1password/tap"  # STALE: no installed item uses it
 # brew "aider"  # STALE: listed 04-05, not installed
 # brew "pnpm"  # STALE: listed 04-05, not installed (the corepack npm global provides pnpm)
+# brew "yarn"  # REPLACED: the corepack npm global owns bin/yarn; with the formula linked first, corepack fails to install
 # brew "python@3.10"  # STALE: not installed; deprecated upstream
 # brew "tldr"  # STALE: not installed; disabled in Homebrew (tlrc replaces it)
 # brew "zsh-autosuggestions"  # STALE: not installed; Oh My Zsh custom plugin supplies it (bootstrap.sh clones it)
