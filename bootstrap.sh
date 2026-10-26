@@ -26,7 +26,8 @@
 # Steps, in order: Xcode Command Line Tools, Homebrew, bare clone into ~/.cfg,
 # checkout (conflicting files go to ~/.cfg-backup/<timestamp>/),
 # status.showUntrackedFiles=no, ~/.config/machine-role, brew bundle (Brewfile,
-# then Brewfile.<role>), Oh My Zsh + custom plugins + TPM, manual next steps.
+# then Brewfile.<role>), OrbStack's first start, Claude Code, Oh My Zsh +
+# custom plugins + TPM, manual next steps.
 #
 # Sudo-only server settings live in macos-server.sh, which this never runs.
 #
@@ -325,6 +326,26 @@ elif orbctl status 2>/dev/null | grep -qi '^running'; then
 else
   run in_tty perl -e 'alarm 300; exec @ARGV' orbctl start \
     || warn "orbctl start failed or took over 5 min; open OrbStack once (Screen Sharing) to finish its setup"
+fi
+
+# --- 7c. Claude Code (native installer, both roles) --------------------------
+# Not a Homebrew item: the native build lives in ~/.local/bin and updates
+# itself. The server runs Claude Code sessions too.
+say "Claude Code"
+if [ "$SKIP_NETWORK" = 1 ]; then
+  echo "  skipped (--skip-network)"
+elif [ -x "$HOME/.local/bin/claude" ] || command -v claude >/dev/null 2>&1; then
+  echo "  already installed"
+else
+  # shellcheck disable=SC2016  # printed literally, as the command to run
+  printf '  + bash -c "$(curl -fsSL https://claude.ai/install.sh)"\n'
+  if [ "$DRY_RUN" -eq 0 ]; then
+    if claude_installer="$(curl -fsSL https://claude.ai/install.sh)"; then
+      bash -c "$claude_installer" </dev/null || warn "Claude Code install failed"
+    else
+      warn "could not download the Claude Code installer"
+    fi
+  fi
 fi
 
 # --- 8. Oh My Zsh, its custom plugins, TPM -----------------------------------
