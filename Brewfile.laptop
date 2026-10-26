@@ -1,4 +1,5 @@
-# Brewfile.laptop - GUI and portable-only items for the MacBook.
+# Brewfile.laptop - portable-only and niche apps for the MacBook.
+# Daily-driver GUI apps for both Macs are in Brewfile (Desk apps).
 # bootstrap.sh --role laptop runs this after Brewfile.
 
 # --- Taps ---
@@ -35,64 +36,46 @@ cask "blackhole-2ch"  # virtual audio for meeting capture
 cask "cleanmymac-cli"  # unsure: needed at all?
 # Menu bar app for tracking agentic coding limits and usage
 cask "codexbar"
-# Allows switching between application windows
-cask "contexts", args: { appdir: "/Applications" }
-cask "font-fira-code-nerd-font", args: { appdir: "/Applications" }
-cask "font-hack-nerd-font", args: { appdir: "/Applications" }
-cask "font-jetbrains-mono-nerd-font"
-cask "font-monaspace", args: { appdir: "/Applications" }
+# Voice and text chat
+cask "discord"
+# Collaborative design tool
+cask "figma"
 # Font manager
 cask "fontbase", args: { appdir: "/Applications" }
 # Terminal emulator that uses platform-native UI and GPU acceleration
 cask "ghostty"  # server needs only its terminfo; see REVIEW
-# Web browser
-cask "google-chrome", args: { appdir: "/Applications" }  # unsure: Viewer browser tests on the mini may want it
 cask "goplaces"  # unsure: what uses this?
 # Software-defined radio receiver powered by GNU Radio and Qt
 cask "gqrx", args: { appdir: "/Applications" }
-# Terminal emulator as alternative to Apple's Terminal app
-cask "iterm2", args: { appdir: "/Applications" }
-# JetBrains tools manager
-cask "jetbrains-toolbox", args: { appdir: "/Applications" }  # unsure: Viewer dev on the mini over JetBrains Gateway would want it there too
 # Extensible editor for OpenStreetMap
 cask "josm", args: { appdir: "/Applications" }
-# Local-first alternative to Logitech Options+ for HID++ devices
-cask "openlogi"  # mouse driver
+# Notes and docs workspace
+cask "notion"
+# OpenCode desktop app
+cask "opencode-desktop"
+# Notes app
+cask "pronotes"
 # App icon replacement utility
 cask "replacicon", args: { appdir: "/Applications" }
 # Collection of apps available by subscription
 cask "setapp", args: { appdir: "/Applications" }
-# Music streaming service
-cask "spotify", args: { appdir: "/Applications" }
-# Git client focusing on power and productivity
-cask "tower", args: { appdir: "/Applications" }
-# Open-source BitTorrent client
-cask "transmission", args: { appdir: "/Applications" }
-# Open-source code editor
-cask "visual-studio-code", args: { appdir: "/Applications" }
+# Messaging app
+cask "telegram"
 # Multimedia player
 cask "vlc"
-# Rust-based terminal
-cask "warp"  # unsure: still used beside Ghostty and iTerm2?
 # Video communication and virtual meeting platform
 cask "zoom", args: { appdir: "/Applications" }
 
 # --- App Store ---
 mas "Amphetamine", id: 937984704  # laptop keep-awake; the mini uses pmset (macos-server.sh)
-mas "Drafts", id: 1435957248
-mas "Fantastical", id: 975937182
 mas "Home Assistant", id: 1099568401
 mas "NordVPN", id: 905953485
 mas "Peek", id: 1554235898
-mas "Slack", id: 803453959
 mas "TaskForge", id: 6744716215
 mas "Termius", id: 1176074088
 mas "Termix", id: 6739386670
 mas "TestFlight", id: 899247664
-mas "TickTick", id: 966085870  # unsure: still used?
-mas "Todoist", id: 585829637  # STALE: Todoist retired 2026-08-31 (TaskNotes replaced it)
 mas "Under My Roof", id: 1524335878
-mas "Windows App", id: 1295203466
 
 # --- VS Code extensions ---
 vscode "1password.op-vscode"
@@ -197,3 +180,6 @@ uv "phone-harness"  # unsure: iPhone Mirroring needs the laptop; adb mode works 
 # cask "qlmarkdown"  # STALE: listed 04-05, not installed
 # mas "CardPointers", id: 1472875808  # STALE: listed 04-05, not installed
 # mas "iMovie", id: 408981434  # STALE: listed 04-05, not installed
+# cask "warp"  # DROPPED 2026-10-26: Ghostty and iTerm2 cover it
+# mas "TickTick", id: 966085870  # DROPPED 2026-10-26: not used
+# mas "Todoist", id: 585829637  # DROPPED 2026-10-26: retired 2026-08-31; TaskNotes replaced it

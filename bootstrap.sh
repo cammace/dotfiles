@@ -26,8 +26,9 @@
 # Steps, in order: Xcode Command Line Tools, Homebrew, bare clone into ~/.cfg,
 # checkout (conflicting files go to ~/.cfg-backup/<timestamp>/),
 # status.showUntrackedFiles=no, ~/.config/machine-role, brew bundle (Brewfile,
-# then Brewfile.<role>), OrbStack's first start, Claude Code, Oh My Zsh +
-# custom plugins + TPM, manual next steps.
+# then Brewfile.<role>), OrbStack's first start, Claude Code, Chrome as the
+# default browser, iTerm2's settings folder, Oh My Zsh + custom plugins + TPM,
+# manual next steps.
 #
 # Sudo-only server settings live in macos-server.sh, which this never runs.
 #
@@ -348,6 +349,40 @@ else
   fi
 fi
 
+# --- 7d. Default browser and iTerm2 settings (both roles) --------------------
+# Changing the default browser makes macOS show a "keep or change" dialog on the
+# Mac's own screen; somebody has to click it there. A re-run skips the dialog
+# once Chrome already handles https.
+# iTerm2 reads its settings from a private iCloud Drive folder, not from this
+# public repo: its plist carries host names, profile commands and window state.
+# The keys only stick while iTerm2 is not running, because a running iTerm2
+# rewrites its settings when it quits.
+say "Default browser and iTerm2 settings"
+ITERM_PREFS_DIR="$HOME/Library/Mobile Documents/com~apple~CloudDocs/Mac Settings/iTerm2"
+if defaults read com.apple.LaunchServices/com.apple.launchservices.secure LSHandlers 2>/dev/null \
+    | grep -B1 'LSHandlerURLScheme = https;' | grep -q 'com.google.chrome'; then
+  echo "  Chrome is already the default browser"
+elif [ "$DRY_RUN" -eq 0 ] && ! command -v defaultbrowser >/dev/null 2>&1; then
+  warn "defaultbrowser not found (brew bundle); set Chrome in System Settings > Desktop & Dock"
+else
+  if run defaultbrowser chrome; then
+    echo "  click 'Use \"Google Chrome\"' in the dialog on the Mac's screen"
+  else
+    warn "defaultbrowser chrome failed; set Chrome in System Settings > Desktop & Dock"
+  fi
+fi
+# shellcheck disable=SC2009  # pgrep -x missed a running iTerm2 in testing; ps sees it
+if [ "$(defaults read com.googlecode.iterm2 PrefsCustomFolder 2>/dev/null)" = "$ITERM_PREFS_DIR" ]; then
+  echo "  iTerm2 already loads its settings from iCloud Drive"
+elif [ ! -f "$ITERM_PREFS_DIR/com.googlecode.iterm2.plist" ] && [ "$DRY_RUN" -eq 0 ]; then
+  warn "no iTerm2 settings at $ITERM_PREFS_DIR; sign in to iCloud Drive, let it sync, and re-run"
+elif ps -axco comm= | grep -qx iTerm2; then
+  warn "iTerm2 is running; quit it and re-run so it loads its settings from iCloud Drive"
+else
+  run defaults write com.googlecode.iterm2 PrefsCustomFolder -string "$ITERM_PREFS_DIR"
+  run defaults write com.googlecode.iterm2 LoadPrefsFromCustomFolder -bool true
+fi
+
 # --- 8. Oh My Zsh, its custom plugins, TPM -----------------------------------
 say "Oh My Zsh"
 ZSH_DIR="$HOME/.oh-my-zsh"
@@ -459,18 +494,25 @@ Next steps (manual):
   2. gh auth login
   3. tailscale up   (or sign in from the Tailscale app)
   4. Clone the Clio repo and run its ops/bootstrap.sh.
+  5. Sign in to your Apple ID with iCloud Drive on, and to the App Store app,
+     then re-run this script: the App Store apps and iTerm2's settings need them.
+  6. App settings that sync through their own accounts, not this repo:
+     - VS Code: Accounts > Backup and Sync Settings, with GitHub.
+     - JetBrains Toolbox: install IntelliJ IDEA, DataGrip and Gateway, then
+       turn on Backup and Sync in each IDE with your JetBrains account.
+     - Raycast: sign in and turn on Cloud Sync.
 EOF
 if [ "$ROLE" = server ]; then
   cat <<EOF
-  5. Server settings (sleep, auto-restart, wake on LAN, Remote Login, Screen
+  7. Server settings (sleep, auto-restart, wake on LAN, Remote Login, Screen
      Sharing, hostname). Read it first, then:  sudo ~/macos-server.sh <hostname>
      Then the per-user defaults, without sudo:  ~/macos-defaults.sh
-  6. OrbStack, Ollama and every LaunchAgent run only inside a logged-in user
+  8. OrbStack, Ollama and every LaunchAgent run only inside a logged-in user
      session. For them to come back after a power cut, turn on automatic login
      (System Settings > Users & Groups; needs FileVault off). OrbStack cannot
      update itself without its GUI: brew upgrade --greedy orbstack
-  7. Open a new shell (exec zsh -l) so the role switch takes effect.
+  9. Open a new shell (exec zsh -l) so the role switch takes effect.
 EOF
 else
-  echo "  5. Open a new shell (exec zsh -l)."
+  echo "  7. Open a new shell (exec zsh -l)."
 fi

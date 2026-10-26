@@ -204,6 +204,56 @@ cask "micronaut-projects/tap/micronaut", args: { appdir: "/Applications" }, trus
 cask "session-manager-plugin"
 # Mesh VPN based on WireGuard
 cask "tailscale-app"  # unsure: GUI app needs a login session on the mini; the tailscale formula runs headless as a daemon
+# --- Desk apps (both Macs) ---
+# The mini has its own monitor and keyboard, so it gets the daily-driver GUI
+# apps too. Laptop-only and niche apps stay in Brewfile.laptop.
+# Sets the default browser; bootstrap.sh runs `defaultbrowser chrome`
+brew "defaultbrowser"
+# Display controls: scaling, HiDPI, brightness
+cask "betterdisplay"
+# Anthropic's desktop app
+cask "claude"
+# Allows switching between application windows
+cask "contexts", args: { appdir: "/Applications" }
+# System-wide autocomplete
+cask "cotypist"
+cask "font-fira-code-nerd-font", args: { appdir: "/Applications" }
+cask "font-hack-nerd-font", args: { appdir: "/Applications" }
+cask "font-jetbrains-mono-nerd-font"
+cask "font-monaspace", args: { appdir: "/Applications" }
+# Web browser
+cask "google-chrome", args: { appdir: "/Applications" }  # default browser on both Macs; bootstrap.sh sets it
+# Media player
+cask "iina"
+# Terminal emulator as alternative to Apple's Terminal app
+cask "iterm2", args: { appdir: "/Applications" }
+# JetBrains tools manager
+cask "jetbrains-toolbox", args: { appdir: "/Applications" }  # IntelliJ IDEA, DataGrip and Gateway install through Toolbox, not casks
+# Markdown knowledge base (the Clio vault)
+cask "obsidian"
+# Local-first alternative to Logitech Options+ for HID++ devices
+cask "openlogi"  # mouse driver
+# Launcher; settings move with Raycast Cloud Sync or its export, not dotfiles
+cask "raycast"
+# Music streaming service
+cask "spotify", args: { appdir: "/Applications" }
+# Menu bar manager
+cask "thaw"
+# Git client focusing on power and productivity
+cask "tower", args: { appdir: "/Applications" }
+# Open-source BitTorrent client
+cask "transmission", args: { appdir: "/Applications" }
+# Open-source code editor
+cask "visual-studio-code", args: { appdir: "/Applications" }
+# Menu bar utilities
+cask "vorssaint"
+# Code editor; settings in ~/.config/zed
+cask "zed"
+# App Store (mas needs an Apple ID signed in to the App Store app)
+mas "Drafts", id: 1435957248
+mas "Fantastical", id: 975937182
+mas "Slack", id: 803453959
+mas "Windows App", id: 1295203466
 
 # --- Go ---
 go "github.com/rhysd/actionlint/cmd/actionlint"  # duplicate of brew actionlint
