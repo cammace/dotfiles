@@ -1,0 +1,11 @@
+// Zed keymap overrides. base_keymap is "JetBrains", which binds inline assist
+// to `ctrl-\`. cmd-i is added as a second, easier-to-reach binding.
+[
+  {
+    "context": "Editor && mode == full",
+    "use_key_equivalents": true,
+    "bindings": {
+      "cmd-i": "assistant::InlineAssist"
+    }
+  }
+]

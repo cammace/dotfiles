@@ -1,0 +1,118 @@
+// Zed settings
+//
+// For information on how to configure Zed, see the Zed
+// documentation: https://zed.dev/docs/configuring-zed
+//
+// To see all of Zed's default settings without changing your
+// custom settings, run `zed: open default settings` from the
+// command palette (cmd-shift-p / ctrl-shift-p)
+{
+  "status_bar": {
+    "cursor_position_button": false
+  },
+  "ssh_connections": [
+    {
+      "host": "dev-machine",
+      "args": [],
+      "projects": [
+        {
+          "paths": [
+            "/home/cammace"
+          ]
+        }
+      ]
+    }
+  ],
+  "project_panel": {
+    "file_icons": false,
+    "entry_spacing": "standard",
+    "dock": "right"
+  },
+  "outline_panel": {
+    "dock": "right"
+  },
+  "collaboration_panel": {
+    "dock": "right"
+  },
+  "agent": {
+    // Powers the built-in agent panel AND the inline assist (ctrl-backslash / cmd-i).
+    // Billed against the commhospital Copilot seat, not Anthropic API credits.
+    "default_model": {
+      "provider": "copilot_chat",
+      "model": "claude-sonnet-5.5"
+    },
+    "enable_feedback": false,
+    "favorite_models": [
+      { "provider": "copilot_chat", "model": "claude-sonnet-5.5" },
+      { "provider": "copilot_chat", "model": "claude-opus-5.5" }
+    ],
+    // Zed's agents (built-in and ACP) never run Claude Code hooks, so the
+    // git fences from AGENTS.md live here. Deny wins over every other rule.
+    "tool_permissions": {
+      "tools": {
+        "terminal": {
+          "always_deny": [
+            { "pattern": "--no-verify" },
+            { "pattern": "--no-gpg-sign|commit\\.gpgsign=false" },
+            { "pattern": "git\\s+add\\s+(-A|--all)\\b" },
+            { "pattern": "git\\s+commit\\b.*\\s(-[a-zA-Z]*a[a-zA-Z]*|--all)\\b", "case_sensitive": true },
+            { "pattern": "git\\s+push\\s+.*(-f\\b|--force)" }
+          ]
+        }
+      }
+    }
+  },
+  // Ghost-text completions. Cotypist does not reach Zed's GPUI buffer, so
+  // Copilot fills the gap here - including in Markdown.
+  "edit_predictions": {
+    "allow_data_collection": "no",
+    "provider": "copilot"
+  },
+  "languages": {
+    "Markdown": {
+      "show_edit_predictions": true,
+      "soft_wrap": "editor_width",
+      "allow_rewrap": "anywhere",
+      "format_on_save": "off",
+      "remove_trailing_whitespace_on_save": false
+    }
+  },
+  "git_panel": {
+    "dock": "right"
+  },
+  "agent_servers": {
+    "opencode": {
+      "type": "registry"
+    },
+    "github-copilot-cli": {
+      "type": "registry"
+    },
+    "claude-acp": {
+      "type": "registry"
+    }
+  },
+  // Extensions Zed ensures are installed on launch. Grammar-only entries
+  // (mermaid) cost nothing; markdown-oxide and harper each spawn one LSP.
+  "auto_install_extensions": {
+    "markdown-oxide": true,
+    "harper": true,
+    "mermaid": true
+  },
+  "telemetry": {
+    "diagnostics": false,
+    "metrics": false
+  },
+  "session": {
+    "trust_all_worktrees": true
+  },
+  // A dirty buffer blocks reload when Obsidian, LiveSync or git-sync rewrites the file.
+  "autosave": "on_focus_change",
+  "base_keymap": "JetBrains",
+  "ui_font_size": 16,
+  "buffer_font_size": 15,
+  "theme": {
+    "mode": "system",
+    "light": "One Light",
+    "dark": "One Dark",
+  },
+}

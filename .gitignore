@@ -21,6 +21,9 @@
 !.config/gh/config.yml
 !.config/ghostty/
 !.config/ghostty/config
+!.config/zed/
+!.config/zed/settings.json
+!.config/zed/keymap.json
 
 # Claude Code
 !.claude/
