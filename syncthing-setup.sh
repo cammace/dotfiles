@@ -12,7 +12,13 @@
 # learns about them. Without global discovery a peer is found by LAN broadcast
 # or by the addresses given to `pair` (tcp://<tailnet-ip>:22000).
 # Staggered versioning keeps old copies in .stversions, so a bad edit or a
-# delete on one Mac can be undone on the other.
+# delete can be undone.
+#
+# Sync is one-way: the laptop sends, the server only receives. The mini has
+# FileVault off and logs in by itself, and ssh runs bin/homelab-direct on every
+# connection; a two-way folder would let anyone at the mini's desk run code on
+# the laptop. For two-way, set MAC_SETTINGS_FOLDER_TYPE=sendreceive on both Macs
+# and re-run. The role comes from ~/.config/machine-role (missing = laptop).
 #
 # Layout of ~/Sync/mac-settings and where `link` points each file:
 #   iTerm2/             read by iTerm2 itself (bootstrap.sh sets the folder)
@@ -24,12 +30,19 @@
 set -euo pipefail
 
 FOLDER_ID=mac-settings
+ROLE_FILE="$HOME/.config/machine-role"
+ROLE=laptop
+[ -r "$ROLE_FILE" ] && ROLE="$(tr -d '[:space:]' < "$ROLE_FILE")"
+case "$ROLE" in
+  server) FOLDER_TYPE="${MAC_SETTINGS_FOLDER_TYPE:-receiveonly}" ;;
+  *)      FOLDER_TYPE="${MAC_SETTINGS_FOLDER_TYPE:-sendonly}" ;;
+esac
 SYNC_DIR="$HOME/Sync/$FOLDER_ID"
 DRY_RUN=0
 CMD=setup
 case "${1:-}" in
   pair|link) CMD="$1"; shift ;;
-  -h|--help) sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+  -h|--help) sed -n '2,29p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
 esac
 if [ "${1:-}" = --dry-run ]; then DRY_RUN=1; shift; fi
 
@@ -66,6 +79,8 @@ setup)
   else
     st config folders add --id "$FOLDER_ID" --label "Mac settings" --path "$SYNC_DIR"
   fi
+  # Set on every run, not only at creation, so an existing folder converges.
+  st config folders "$FOLDER_ID" type set "$FOLDER_TYPE"
   st config folders "$FOLDER_ID" versioning type set staggered
   echo "  this Mac's device ID: $(my_id)"
   ;;
@@ -77,7 +92,11 @@ pair)
   if [ "$DRY_RUN" -eq 0 ] && syncthing cli config devices list | grep -qx "$peer"; then
     echo "  device already known"
   else
-    st config devices add --device-id "$peer" --addresses "$(IFS=,; echo "${addrs[*]}")"
+    # One --addresses flag per address: a comma-joined value is stored as a
+    # single, unusable address.
+    addr_flags=()
+    for a in "${addrs[@]}"; do addr_flags+=(--addresses "$a"); done
+    st config devices add --device-id "$peer" "${addr_flags[@]}"
   fi
   if [ "$DRY_RUN" -eq 0 ] && syncthing cli config folders "$FOLDER_ID" devices list | grep -qx "$peer"; then
     echo "  folder already shared with it"
