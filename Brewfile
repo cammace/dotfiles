@@ -189,6 +189,8 @@ cask "1password", args: { appdir: "/Applications" }
 cask "1password-cli"
 # Microsoft Azure CLI (Homebrew moved it from a formula to a cask)
 cask "azure-cli"
+# Google's agent orchestration app (Antigravity); signs in with a Google account
+cask "antigravity"
 # OpenAI's coding agent that runs in your terminal
 cask "codex"
 # Brings the power of Copilot coding agent directly to your terminal
