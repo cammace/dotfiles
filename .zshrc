@@ -277,6 +277,18 @@ export PATH="$HOME/.antigravity/antigravity/bin:$PATH"
 
 export CLAUDE_CODE_THEME=dark
 
+# Server: the first iTerm2 shell attaches the computer-use tmux session (own
+# socket, `-L cu`), so the tmux server starts under iTerm2 and keeps its
+# Accessibility and Screen Recording grants. Laptop sessions drive it with
+# `tmux -L cu send-keys -t cu`. Later iTerm2 shells stay plain. Its claude is
+# pinned to the personal Max account (computer use needs Pro/Max) by a cswap
+# session profile, so a global `cswap switch` cannot move it.
+if [[ "$MACHINE_ROLE" == server && "$TERM_PROGRAM" == iTerm.app && -z "$TMUX" && -z "$SSH_CONNECTION" && $- == *i* ]] \
+   && [[ -z "$(tmux -L cu list-clients -t cu 2>/dev/null)" ]]; then
+    exec tmux -L cu new-session -A -s cu -c "$HOME/cu" \
+        "zsh -lic 'cswap run cameronmace10@gmail.com --require-session; exec zsh -l'"
+fi
+
 # Launch tmux session picker on SSH login (Termius/Tailscale)
 # If the picker exits without selecting a session (q to quit), disconnect
 if [[ -n "$SSH_CONNECTION" && -z "$TMUX" && $- == *i* ]]; then
