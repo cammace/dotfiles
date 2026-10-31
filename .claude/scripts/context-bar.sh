@@ -197,9 +197,15 @@ case "$(sysctl -n kern.memorystatus_vm_pressure_level 2>/dev/null)" in
     4) ram_lvl="critical" ;;
     *) ram_lvl="" ;;
 esac
+read -r sw_used sw_mb < <(sysctl -n vm.swapusage 2>/dev/null | awk '{u=$6; sub(/M/,"",u); printf "%.1f %d\n", u/1024, u}')
+# Bands scale with RAM (2026-10-31): the dotfiles also run on the 64 GB mini, so no GB is
+# hardcoded. 25% / 50% of RAM color the figure; 75% is the MacBook memory guard's swap limit
+# (12 GB of 16, watchdog.py MEM_SWAP_MAX_MB) and shows the segment whatever the kernel level -
+# with the session stop line lifted, this is where sessions see it.
+ram_mb=$(( $(sysctl -n hw.memsize 2>/dev/null || echo 17179869184) / 1048576 ))
+(( ${sw_mb:-0} >= ram_mb * 3 / 4 )) && [[ -z "$ram_lvl" ]] && ram_lvl="guard"
 if [[ -n "$ram_lvl" ]]; then
-    read -r sw_used sw_mb < <(sysctl -n vm.swapusage 2>/dev/null | awk '{u=$6; sub(/M/,"",u); printf "%.1f %d\n", u/1024, u}')
-    if (( ${sw_mb:-0} >= 8192 )); then C_SW="$C_ALERT"; elif (( ${sw_mb:-0} >= 4096 )); then C_SW="$C_WARN"; else C_SW="$C_ACCENT"; fi
+    if (( ${sw_mb:-0} >= ram_mb / 2 )); then C_SW="$C_ALERT"; elif (( ${sw_mb:-0} >= ram_mb / 4 )); then C_SW="$C_WARN"; else C_SW="$C_ACCENT"; fi
     [[ "$ram_lvl" == "critical" ]] && C_LBL="$C_ALERT" || C_LBL="$C_WARN"
     # e.g. "🧠 swap 7.1G": label colored by kernel pressure, the figure by swap size
     ram="${C_LBL}🧠 swap ${C_SW}${sw_used}G${C_RESET}"
