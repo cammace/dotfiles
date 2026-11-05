@@ -9,3 +9,8 @@ brew "ollama", restart_service: :changed
 brew "whisper.cpp"
 
 # Docker comes from OrbStack, in the common Brewfile.
+
+# --- Casks ---
+# Agent browser: one CDP-driven instance per account (homelab runbook mac-mini.md, Agent Chrome).
+# Beta, not Chrome, so its bundle id never catches links meant for the default browser.
+cask "google-chrome@beta"
