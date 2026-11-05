@@ -84,7 +84,6 @@ Mac without the file behaves exactly as the laptop always has.
 |---|---|---|
 | `~/.clio/env` sourced at shell start (runs `op read` for secrets) | yes | no: `~/.clio/bin` goes on `PATH`, and `load-clio-env` loads the rest on demand |
 | `SSH_AUTH_SOCK` points at the 1Password agent | always | only once 1Password has created the socket |
-| `update_ha_power.sh` reports battery power to Home Assistant | yes | exits at once |
 | `TERM` with no terminfo entry (Ghostty over SSH sends `xterm-ghostty`) | unchanged | falls back to `xterm-256color` |
 | Non-login zsh (`ssh host cmd`) gets Homebrew on `PATH` from `.zshenv` | no change | yes |
 | `~/.config/git/local.gitconfig` (untracked, included last by `.gitconfig`, so it beats `git config --global`: edit this file instead) | none | written once by bootstrap: `core.editor = nano` |
@@ -130,7 +129,6 @@ brew bundle dump --file=/tmp/Brewfile.current   # then move new lines into the r
 | `.config/git/ignore` | Global git ignore |
 | `.config/ghostty/config` | Ghostty terminal: Nord theme, quick terminal, iTerm2-style splits |
 | `.iterm2/*.sh` | iTerm2 semantic-history handlers (open `file:line`, GitHub refs) |
-| `update_ha_power.sh` | Cron script reporting MacBook power draw to Home Assistant (laptop only) |
 | `.claude/CLAUDE.md` | Claude Code instructions: response style (concise, skimmable) + work-tracking rules |
 | `.claude/hooks/codex-pr-review-gate.sh` | PreToolUse gate: runs a Codex adversarial review before `gh pr create` / `git push` to a branch with an open PR |
 | `.claude/hooks/unpushed-commits.py` | Stop hook: nags about commits that were never pushed |

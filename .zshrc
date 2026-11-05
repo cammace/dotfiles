@@ -1,7 +1,7 @@
 # Machine role: "laptop" or "server", read from the untracked
 # ~/.config/machine-role that bootstrap.sh writes. A missing or unreadable file
 # means laptop, so the MacBook behaves exactly as it did before the switch.
-# Not exported: scripts that care (update_ha_power.sh) read the file themselves.
+# Not exported: scripts that care read the file themselves.
 # Read first, before Oh My Zsh, so the TERM fallback below runs ahead of zle.
 MACHINE_ROLE=laptop
 [[ -f "$HOME/.config/machine-role" && -r "$HOME/.config/machine-role" ]] && MACHINE_ROLE="$(<"$HOME/.config/machine-role")"
