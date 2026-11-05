@@ -5,7 +5,7 @@
 # --- Taps ---
 tap "antoniorodr/memo"
 tap "openclaw/tap", trusted: { casks: ["goplaces"] }
-tap "steipete/tap", trusted: { casks: ["codexbar"] }
+tap "steipete/tap"
 
 # --- Formulae ---
 # Select default apps for documents and URL schemes on macOS
@@ -13,7 +13,6 @@ brew "duti"
 # Tool to capture still images from an iSight or other video source
 brew "imagesnap"  # camera capture; the mini has no camera
 # Media player based on MPlayer and mplayer2
-brew "mpv"
 # Create, run, and share large language models (LLMs)
 brew "ollama", restart_service: :changed  # unsure: thin-client laptop can drop this once the mini runs it
 # Open client for Cisco AnyConnect VPN
@@ -35,7 +34,6 @@ cask "blackhole-2ch"  # virtual audio for meeting capture
 # Command-line interface for CleanMyMac
 cask "cleanmymac-cli"  # unsure: needed at all?
 # Menu bar app for tracking agentic coding limits and usage
-cask "codexbar"
 # Voice and text chat
 cask "discord"
 # Collaborative design tool
