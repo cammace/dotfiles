@@ -164,7 +164,7 @@ alias refresh="source ~/.zshrc"
 # new shell errors with "no such file" pointing at an old versioned Cellar path.
 evalcache-clear() { rm -f "$HOME/.zsh-evalcache/"*.sh "$HOME/.zsh-evalcache/"*.zwc && echo "evalcache cleared — open a new shell to rebuild"; }
 alias zshconfig="code ~/.zshrc"
-alias hermes="ssh dev-machine"
+alias hermes-dev="ssh dev-machine"  # bare `hermes` = local Hermes CLI (mini, 2026-11-05)
 
 # eza (replaces ls)
 alias ls='eza --group-directories-first'
